@@ -194,6 +194,8 @@ class SimSetup:
     dt_s: float = 1.0
     t_end_s: float = 3600.0
     Q_fixed_m3_s: Optional[float] = None
+    Q_floor_m3_s: float = 0.0   # ← NUEVO: caudal mínimo físico (fugas/bypass)
+
 
 # ---------- Mezcla / Especies (nuevo) -------------
 

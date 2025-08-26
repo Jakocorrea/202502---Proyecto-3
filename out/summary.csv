@@ -1,0 +1,2 @@
+Q_prom [m3/s],V_face_prom [m/s],V_duct_prom [m/s],C_tot_pico [mg/m3],t_pico_C_tot [s],VOC_pico [ppm],t_pico_ppm [s],E_electrica [Wh],Vapor_descarga [kg],Aerosol_descarga [kg],Capturado_filtro [kg]
+0.027595,0.015331,0.219596,567045,3600,1.37272e+06,3600,15.1751,0.250106,0.025,0.225
