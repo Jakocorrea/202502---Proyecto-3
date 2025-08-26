@@ -338,42 +338,53 @@ class Simulator:
         return total_dp, (v_re_list[0]["v"] if v_re_list else 0.0), (v_re_list[0]["Re"] if v_re_list else 0.0), v_re_list
 
     def find_operating_Q(self) -> Tuple[float, Dict[str, float], List[Dict[str, float]]]:
-        """Encuentra Q tal que DP_fan(Q) = DP_sistema(Q)."""
         fan = self.cfg.fan
-
-        # límites de búsqueda según curvas
         Qmin = max(0.0, min(fan.curve["Q"]))
         Qmax = max(fan.curve["Q"])
-        # ampliar un poco el rango por robustez
-        Qlo = 0.0
-        Qhi = Qmax*1.2
+        Qlo, Qhi = 0.0, Qmax*1.2
 
         def F(Q: float) -> float:
             sys_dp, _, _, _ = self.system_dp_without_fan(Q)
             return fan.dp(Q) - sys_dp
 
-        # bisección simple
-        f_lo = F(Qlo)
-        f_hi = F(Qhi)
-        # si no cambian de signo, trata un punto medio de la curva
-        if f_lo*f_hi > 0:
-            Q_try = 0.5*(Qmin + Qmax)
-            return Q_try, {"DP_fan_Pa": fan.dp(Q_try), "DP_sys_Pa": self.system_dp_without_fan(Q_try)[0]}, []
+        f_lo, f_hi = F(Qlo), F(Qhi)
 
-        for _ in range  (60):
-            mid = 0.5*(Qlo + Qhi)
-            f_mid = F(mid)
-            if abs(f_mid) < 1e-3:
-                break
-            if f_lo * f_mid <= 0:
-                Qhi = mid
-                f_hi = f_mid
-            else:
-                Qlo = mid
-                f_lo = f_mid
-        Q = 0.5*(Qlo + Qhi)
+    # — Caso con intersección: bisección
+        if f_lo * f_hi <= 0:
+            for _ in range(60):
+                mid = 0.5*(Qlo + Qhi)
+                f_mid = F(mid)
+                if abs(f_mid) < 1e-3:
+                    break
+                if f_lo * f_mid <= 0:
+                    Qhi, f_hi = mid, f_mid
+                else:
+                    Qlo, f_lo = mid, f_mid
+            Q = 0.5*(Qlo + Qhi)
+            sys_dp, v0, Re0, v_re_list = self.system_dp_without_fan(Q)
+            return Q, {"DP_fan_Pa": fan.dp(Q), "DP_sys_Pa": sys_dp,
+                    "v_duct0_m_s": v0, "Re_duct0": Re0}, v_re_list
+
+        # — Sin intersección: elige extremo físico o mínimo error
+        grid_Q = fan.curve["Q"]
+        best_Q = grid_Q[0]
+        best_err = abs(F(best_Q))
+        for q in grid_Q[1:]:
+            err = abs(F(q))
+            if err < best_err:
+                best_err, best_Q = err, q
+
+        if f_lo < 0 and f_hi < 0:
+            Q = Qmin       # pérdidas del sistema > DP del fan en todo el rango → Q≈mínimo
+        elif f_lo > 0 and f_hi > 0:
+            Q = Qmax       # el fan “sobra” en todo el rango → Q≈máximo
+        else:
+            Q = best_Q     # raro, usa mínimo error
+
         sys_dp, v0, Re0, v_re_list = self.system_dp_without_fan(Q)
-        return Q, {"DP_fan_Pa": fan.dp(Q), "DP_sys_Pa": sys_dp, "v_duct0_m_s": v0, "Re_duct0": Re0}, v_re_list
+        return Q, {"DP_fan_Pa": fan.dp(Q), "DP_sys_Pa": sys_dp,
+                "v_duct0_m_s": v0, "Re_duct0": Re0}, v_re_list
+
 
     # -------- emisiones --------
 

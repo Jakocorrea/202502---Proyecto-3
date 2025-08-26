@@ -87,7 +87,7 @@
         "active_pistols": [1]
       }
     ],
-    "n_tasks_day": 10,
+    "n_tasks_day": 100,
     "purge_s": 120.0
   },
   "criteria": {
