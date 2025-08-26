@@ -1,5 +1,5 @@
 criterio,cumple
-ok_V_face,False
+ok_V_face,True
 ok_v_duct,False
 ok_C_limit,False
-ok_LFL,False
+ok_LFL,True

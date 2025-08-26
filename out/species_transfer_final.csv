@@ -1,5 +1,5 @@
 Especie,h_m [m/s],W(L) [mg/m3],J_pared [mg/m2/s]
-Ethanol,0,105264,0
-Propyl acetate,0,182954,0
-1-Propanol,0,17320.5,0
-Isopropanol,0,8833.52,0
+Ethanol,0.001478,516.516,0.767177
+Propyl acetate,0.001162,898.648,1.04802
+1-Propanol,0.001304,85.0371,0.111321
+Isopropanol,0.001288,43.3713,0.056111

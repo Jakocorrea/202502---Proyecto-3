@@ -17,7 +17,7 @@ def sdiv(num: float, den: float, default: float = 0.0) -> float:
 
 def main():
     parser = argparse.ArgumentParser(description="Simulación de cabina de pintura (dinámico + especies).")
-    parser.add_argument("--config", "-c", type=str, default="example_config.json",
+    parser.add_argument("--config", "-c", type=str, default="example_config_A_no_filter.json",
                         help="Ruta al archivo JSON de configuración.")
     parser.add_argument("--dt", type=float, default=None, help="Paso de tiempo [s] (override).")
     parser.add_argument("--t_end", type=float, default=None, help="Tiempo final [s] (override).")
