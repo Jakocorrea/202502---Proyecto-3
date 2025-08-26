@@ -1,0 +1,90 @@
+{
+  "geometry": {
+    "L": 4.0,
+    "A": 3.0,
+    "H": 2.5,
+    "area_face": 1.8,
+    "volume": null,
+    "type": "cross-draft"
+  },
+  "air": {
+    "altitude_m": 2640,
+    "T_C": 20.0,
+    "RH": 60.0,
+    "rho": null,
+    "mu": null
+  },
+  "ducts": [
+    { "L": 6.0, "D": 0.4, "eps": 1.5e-4, "K": 1.2 },
+    { "L": 4.0, "D": 0.35, "eps": 1.5e-4, "K": 2.5 }
+  ],
+  "inlets_outlets": {
+    "K_extra": 1.0
+  },
+  "filter": {
+    "dp0_curve": {
+      "Q": [0.0, 0.5, 1.0, 1.5],
+      "DP": [0.0, 50.0, 120.0, 220.0]
+    },
+    "alpha_Pa_per_kg": 180.0,
+    "eta_filter": 0.92,
+    "dp_max_Pa": 1200.0
+  },
+  "fan": {
+    "curve": {
+      "Q": [0.0, 0.5, 1.0, 1.5, 2.0],
+      "DP": [900.0, 850.0, 700.0, 450.0, 120.0]
+    },
+    "eta_fan": 0.62,
+    "eta_motor": 0.9
+  },
+  "source": {
+    "pistols": [
+      {
+        "name": "HVLP_1",
+        "q_l_mL_min": 350.0,
+        "rho_l_kg_L": 0.95,
+        "w_s": 0.6,
+        "TE": 0.55,
+        "f_evap_fast": 0.4,
+        "f_aer": 0.6,
+        "k_ev_s_inv": 0.0005
+      },
+      {
+        "name": "HVLP_2",
+        "q_l_mL_min": 300.0,
+        "rho_l_kg_L": 0.95,
+        "w_s": 0.6,
+        "TE": 0.55,
+        "f_evap_fast": 0.4,
+        "f_aer": 0.6,
+        "k_ev_s_inv": 0.0005
+      }
+    ]
+  },
+  "schedule": {
+    "tasks": [
+      { "t_on_s": 120.0, "t_off_s": 60.0, "repetitions": 3, "active_pistols": [0] },
+      { "t_on_s": 90.0,  "t_off_s": 90.0, "repetitions": 2, "active_pistols": [1] },
+      { "t_on_s": 60.0,  "t_off_s": 60.0, "repetitions": 2, "active_pistols": [0, 1] }
+    ],
+    "n_tasks_day": 1,
+    "purge_s": 300.0
+  },
+  "criteria": {
+    "V_face_obj": 0.5,
+    "ACH_obj": null,
+    "C_limit_mg_m3": 300.0,
+    "LFL_ppm": null,
+    "v_duct_obj": 12.0
+  },
+  "capture_filtering": {
+    "eta_capt_source": 0.2,
+    "k_dep_s_inv": 0.0
+  },
+  "sim": {
+    "dt_s": 1.0,
+    "t_end_s": 3600.0,
+    "Q_fixed_m3_s": null
+  }
+}
