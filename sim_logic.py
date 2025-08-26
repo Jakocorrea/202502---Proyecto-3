@@ -470,7 +470,7 @@ class Simulator:
         out = {}
         for i in names:
             denom = 0.0
-            for j in names + ["AIR"]]:
+            for j in names + ["AIR"]:
                 if j == i:
                     continue
                 yj = y.get(j, 0.0)
