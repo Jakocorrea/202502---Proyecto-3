@@ -1,163 +1,258 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+plot_results.py
+Lee la configuración, ejecuta la simulación (sim_logic.Simulator) y:
+  - Muestra TABLAS resumen en consola (promedios, picos, balances, criterios).
+  - Muestra TABLAS por especie (h_m, W(L), J_pared al final; masa descargada).
+  - Grafica series de tiempo (C_v, C_p, C_tot, ppm, Q, V_face, v_duct, DP, P).
+  - Grafica por especie h_m(t), W_L(t) y J_pared(t).
+
+Uso:
+  python plot_results.py -c example_config.json
+  python plot_results.py -c example_config.json --dt 0.5 --t_end 1200 --save_dir out --no_show
+"""
+
+from typing import Dict, List, Optional
 import argparse
-import json
-import sys
+import os
+import math
+import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 
 from sim_logic import config_from_json, Simulator
 
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        description="Grafica resultados de la simulación de cabina de pintura."
-    )
-    p.add_argument(
-        "-c", "--config", default="example_config.json",
-        help="Ruta al archivo de configuración JSON (por defecto: example_config.json)"
-    )
-    p.add_argument(
-        "--dt", type=float, default=None,
-        help="Paso de tiempo [s] para sobreescribir el del JSON."
-    )
-    p.add_argument(
-        "--t_end", type=float, default=None,
-        help="Tiempo total de simulación [s] para sobreescribir el del JSON."
-    )
-    p.add_argument(
-        "--save", default=None,
-        help="Ruta base para guardar PNGs (sin extensión). Si no se especifica, solo se muestra en pantalla."
-    )
-    p.add_argument(
-        "--dpi", type=int, default=120,
-        help="Resolución de las imágenes al guardar (por defecto: 120 dpi)."
-    )
-    return p.parse_args()
+# -------------------- Utilidades --------------------
+
+def sdiv(num: float, den: float, default: float = 0.0) -> float:
+    return num/den if den not in (0, 0.0) else default
+
+def ensure_dir(path: Optional[str]) -> Optional[str]:
+    if path is None:
+        return None
+    os.makedirs(path, exist_ok=True)
+    return path
+
+def df_save(df: pd.DataFrame, path: Optional[str], filename: str):
+    if path:
+        f = os.path.join(path, filename)
+        df.to_csv(f, index=False)
+
+def fig_save(fig: plt.Figure, path: Optional[str], filename: str, dpi: int):
+    if path:
+        f = os.path.join(path, filename)
+        fig.savefig(f, dpi=dpi, bbox_inches="tight")
+
+def print_table(title: str, df: pd.DataFrame, max_rows: int = 50):
+    print("\n" + "="*80)
+    print(title)
+    print("-"*80)
+    with pd.option_context("display.max_rows", max_rows,
+                           "display.max_columns", 200,
+                           "display.width", 120):
+        print(df.to_string(index=False))
 
 
-def load_sim_params(path: str, override_dt, override_t_end):
-    with open(path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
-    simsec = raw.get("sim", {}) if isinstance(raw, dict) else {}
-    dt = float(simsec.get("dt_s", 1.0)) if override_dt is None else float(override_dt)
-    t_end = float(simsec.get("t_end_s", 3600.0)) if override_t_end is None else float(override_t_end)
-    return dt, t_end
+# -------------------- Gráficas --------------------
+
+def plot_series(df: pd.DataFrame, x: str, y: List[str], ylabel: str, title: str) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    for col in y:
+        if col in df.columns:
+            ax.plot(df[x], df[col], label=col)
+    ax.set_xlabel("t [s]")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    if len(y) > 1:
+        ax.legend()
+    ax.grid(True, alpha=0.3)
+    return fig
+
+def plot_species_series(df: pd.DataFrame, species: List[str], base_key: str,
+                        x_key: str, ylabel: str, title: str) -> plt.Figure:
+    """base_key: 'hm_', 'W_L_', 'Jwall_', 'C_'"""
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    for nm in species:
+        col = f"{base_key}{nm}" + ("_m_s" if base_key == "hm_" else "_mg_m3" if base_key in ("W_L_", "C_") else "_mg_m2_s")
+        if col in df.columns:
+            ax.plot(df[x_key], df[col], label=nm)
+    ax.set_xlabel("t [s]")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    return fig
 
 
-def series(results, key, default=0.0):
-    return [r.get(key, default) for r in results]
-
+# -------------------- Principal --------------------
 
 def main():
-    args = parse_args()
+    parser = argparse.ArgumentParser(description="Graficador/Tabulador para la simulación de cabina.")
+    parser.add_argument("-c", "--config", type=str, default="example_config.json", help="Ruta del JSON de configuración.")
+    parser.add_argument("--dt", type=float, default=None, help="Paso de tiempo [s] (override).")
+    parser.add_argument("--t_end", type=float, default=None, help="Tiempo final [s] (override).")
+    parser.add_argument("--q_fixed", type=float, default=None, help="Caudal fijo [m3/s] (override).")
+    parser.add_argument("--save_dir", type=str, default=None, help="Carpeta para guardar CSV/PNG (opcional).")
+    parser.add_argument("--dpi", type=int, default=150, help="DPI para guardar figuras.")
+    parser.add_argument("--no_show", action="store_true", help="No mostrar ventanas interactivas (solo guardar).")
+    args = parser.parse_args()
 
-    try:
-        # 1) Parámetros y configuración
-        dt_s, t_end_s = load_sim_params(args.config, args.dt, args.t_end)
-        cfg = config_from_json(args.config)
+    out_dir = ensure_dir(args.save_dir)
 
-        # 2) Simulación
-        sim = Simulator(cfg)
-        results, summary = sim.run(t_end_s=t_end_s, dt_s=dt_s)
-        if not results:
-            print("No hay resultados para graficar (lista vacía).", file=sys.stderr)
-            sys.exit(2)
+    # Cargar config y ajustar overrides
+    cfg = config_from_json(args.config)
+    if args.dt is not None:      cfg.sim.dt_s = args.dt
+    if args.t_end is not None:   cfg.sim.t_end_s = args.t_end
+    if args.q_fixed is not None: cfg.sim.Q_fixed_m3_s = args.q_fixed
 
-        # 3) Extraer series
-        t = series(results, "time_s")
-        Q = series(results, "Q_m3_s")
-        V_face = series(results, "V_face_m_s")
-        v_duct = series(results, "v_duct_m_s")
+    sim = Simulator(cfg)
+    rows: List[Dict[str, float]] = sim.run()  # usa dt/t_end de cfg
 
-        DP_sys = series(results, "DP_system_Pa")
-        DP_filt = series(results, "DP_filter_Pa")
-        DP_net = series(results, "DP_network_Pa")
+    if not rows:
+        # Si por alguna razón no hubo pasos, tomar un snapshot estático
+        rows = [sim.step(0.0)]
 
-        C_v = series(results, "C_v_mg_m3")
-        C_p = series(results, "C_p_mg_m3")
-        C_tot = series(results, "C_tot_mg_m3")
+    df = pd.DataFrame(rows)
+    # calcular dt por fila para integrales
+    df["dt"] = df["t_s"].diff().fillna(df["t_s"].clip(lower=cfg.sim.dt_s))
+    df["dt"] = df["dt"].clip(lower=0.0)
 
-        P = series(results, "P_e_W")
-        # Energía acumulada [kWh]
-        energy_kWh = []
-        acc_Wh = 0.0
-        for p in P:
-            acc_Wh += p * dt_s / 3600.0
-            energy_kWh.append(acc_Wh / 1000.0)
+    # ------------------ TABLAS RESUMEN ------------------
 
-        # 4) Figuras
-        # --- Figura 1: Caudal y velocidades
-        plt.figure(figsize=(9, 5))
-        plt.plot(t, Q, label="Q [m³/s]")
-        plt.plot(t, V_face, label="V_face [m/s]")
-        plt.plot(t, v_duct, label="v_duct [m/s]")
-        plt.xlabel("Tiempo [s]")
-        plt.title("Caudal y velocidades")
-        plt.grid(True, alpha=0.3)
-        plt.legend(loc="best")
-        plt.tight_layout()
-        if args.save:
-            plt.savefig(f"{args.save}_flows.png", dpi=args.dpi)
+    # Promedios
+    avg_Q      = df["Q_m3_s"].mean() if "Q_m3_s" in df else 0.0
+    avg_vface  = df["V_face_m_s"].mean() if "V_face_m_s" in df else 0.0
+    avg_vduct  = df["v_duct_m_s"].mean() if "v_duct_m_s" in df else 0.0
 
-        # --- Figura 2: Pérdidas de presión
-        plt.figure(figsize=(9, 5))
-        plt.plot(t, DP_sys, label="ΔP sistema [Pa]")
-        plt.plot(t, DP_net, label="ΔP red ductos [Pa]")
-        plt.plot(t, DP_filt, label="ΔP filtro [Pa]")
-        plt.xlabel("Tiempo [s]")
-        plt.title("Pérdidas de presión")
-        plt.grid(True, alpha=0.3)
-        plt.legend(loc="best")
-        plt.tight_layout()
-        if args.save:
-            plt.savefig(f"{args.save}_pressure.png", dpi=args.dpi)
+    # Picos
+    peak_Ctot  = df["C_tot_mg_m3"].max() if "C_tot_mg_m3" in df else 0.0
+    t_peak_C   = float(df.loc[df["C_tot_mg_m3"].idxmax(), "t_s"]) if "C_tot_mg_m3" in df else 0.0
+    peak_ppm   = df["ppm_voc"].max() if "ppm_voc" in df else 0.0
+    t_peak_ppm = float(df.loc[df["ppm_voc"].idxmax(), "t_s"]) if "ppm_voc" in df else 0.0
 
-        # --- Figura 3: Concentraciones
-        plt.figure(figsize=(9, 5))
-        plt.plot(t, C_v, label="Vapor [mg/m³]")
-        plt.plot(t, C_p, label="Aerosol [mg/m³]")
-        plt.plot(t, C_tot, label="Total [mg/m³]")
-        # Límites (si existen en config)
-        if cfg.criteria and cfg.criteria.C_limit_mg_m3 is not None:
-            import numpy as np
-            plt.plot(t, [cfg.criteria.C_limit_mg_m3] * len(t), "--", label="Límite [mg/m³]")
-        plt.xlabel("Tiempo [s]")
-        plt.title("Concentraciones en cabina")
-        plt.grid(True, alpha=0.3)
-        plt.legend(loc="best")
-        plt.tight_layout()
-        if args.save:
-            plt.savefig(f"{args.save}_concentrations.png", dpi=args.dpi)
+    # Energía (Wh)
+    e_Wh = (df["P_electrica_W"] * df["dt"] / 3600.0).sum() if "P_electrica_W" in df else 0.0
 
-        # --- Figura 4: Potencia y energía acumulada
-        plt.figure(figsize=(9, 5))
-        plt.plot(t, P, label="Potencia eléctrica [W]")
-        plt.plot(t, energy_kWh, label="Energía acumulada [kWh]")
-        plt.xlabel("Tiempo [s]")
-        plt.title("Potencia y energía")
-        plt.grid(True, alpha=0.3)
-        plt.legend(loc="best")
-        plt.tight_layout()
-        if args.save:
-            plt.savefig(f"{args.save}_power_energy.png", dpi=args.dpi)
+    # Balances integrados
+    eta_f = max(0.0, min(1.0, cfg.filter.eta_filter))
+    ex_vap_kg = (df["Q_m3_s"] * (df["C_v_mg_m3"]/1e6) * df["dt"]).sum() if {"Q_m3_s","C_v_mg_m3"}.issubset(df.columns) else 0.0
+    ex_aer_kg = ((1.0 - eta_f) * df["Q_m3_s"] * (df["C_p_mg_m3"]/1e6) * df["dt"]).sum() if {"Q_m3_s","C_p_mg_m3"}.issubset(df.columns) else 0.0
+    cap_filt_kg = (eta_f * df["Q_m3_s"] * (df["C_p_mg_m3"]/1e6) * df["dt"]).sum() if {"Q_m3_s","C_p_mg_m3"}.issubset(df.columns) else 0.0
 
-        # 5) Mostrar en pantalla si no se pidió guardar
-        if not args.save:
-            plt.show()
+    # Tabla resumen general
+    summary_df = pd.DataFrame([{
+        "Q_prom [m3/s]": avg_Q,
+        "V_face_prom [m/s]": avg_vface,
+        "V_duct_prom [m/s]": avg_vduct,
+        "C_tot_pico [mg/m3]": peak_Ctot,
+        "t_pico_C_tot [s]": t_peak_C,
+        "VOC_pico [ppm]": peak_ppm,
+        "t_pico_ppm [s]": t_peak_ppm,
+        "E_electrica [Wh]": e_Wh,
+        "Vapor_descarga [kg]": ex_vap_kg,
+        "Aerosol_descarga [kg]": ex_aer_kg,
+        "Capturado_filtro [kg]": cap_filt_kg
+    }])
+    print_table("RESUMEN GENERAL", summary_df.round(4))
+    df_save(summary_df, out_dir, "summary.csv")
 
-        # 6) Mensaje de resumen útil en consola
-        print("\n=== Resumen (para referencia) ===")
-        print(f"Energía total [kWh]: {summary.get('energy_kWh', 0.0):.4f}")
-        print(f"ΔP sistema máx [Pa]: {summary.get('DP_system_Pa_max', 0.0):.2f}")
-        print(f"ΔP filtro final [Pa]: {summary.get('DP_filter_Pa_final', 0.0):.2f}")
-        print(f"C_total máx [mg/m³]: {summary.get('C_total_mg_m3_max', 0.0):.3f}")
-        print(f"C_total prom [mg/m³]: {summary.get('C_total_mg_m3_avg', 0.0):.3f}")
+    # ------------------ TABLAS POR ESPECIE ------------------
 
-    except FileNotFoundError:
-        print(f"Error: no se encontró el archivo de configuración '{args.config}'.", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        print("Error al graficar resultados:", str(e), file=sys.stderr)
-        sys.exit(2)
+    sp_names = [sp.name for sp in cfg.mixture.species]
 
+    # (1) Masa descargada a ducto (vapor) por especie
+    mass_rows = []
+    for nm in sp_names:
+        col = f"C_{nm}_mg_m3"
+        if col in df:
+            m_kg = (df["Q_m3_s"] * (df[col]/1e6) * df["dt"]).sum()
+            mass_rows.append({"Especie": nm, "Masa_vapor_descargada [kg]": m_kg})
+    mass_df = pd.DataFrame(mass_rows)
+    print_table("MASA DESCARGADA POR ESPECIE (vapor)", mass_df.round(6))
+    df_save(mass_df, out_dir, "species_mass.csv")
+
+    # (2) h_m, W(L) y J_pared en el último paso
+    last = df.iloc[-1]
+    xfer_rows = []
+    for nm in sp_names:
+        row = {
+            "Especie": nm,
+            "h_m [m/s]": float(last.get(f"hm_{nm}_m_s", np.nan)),
+            "W(L) [mg/m3]": float(last.get(f"W_L_{nm}_mg_m3", np.nan)),
+            "J_pared [mg/m2/s]": float(last.get(f"Jwall_{nm}_mg_m2_s", np.nan))
+        }
+        xfer_rows.append(row)
+    xfer_df = pd.DataFrame(xfer_rows)
+    print_table("TRANSFERENCIA (snapshot final)", xfer_df.round(6))
+    df_save(xfer_df, out_dir, "species_transfer_final.csv")
+
+    # (3) Criterios (si existen flags)
+    crit_cols = [c for c in df.columns if c.startswith("ok_")]
+    if crit_cols:
+        crit_last = pd.DataFrame([{"criterio": c, "cumple": bool(last[c])} for c in crit_cols])
+        print_table("CRITERIOS (snapshot final)", crit_last)
+        df_save(crit_last, out_dir, "criteria_snapshot.csv")
+
+    # Guardar el timeseries completo (opcional)
+    df_save(df, out_dir, "timeseries.csv")
+
+    # ------------------ GRÁFICAS ------------------
+
+    figs: List[plt.Figure] = []
+
+    # Concentraciones
+    if {"C_v_mg_m3","C_p_mg_m3","C_tot_mg_m3"}.issubset(df.columns):
+        f = plot_series(df, "t_s", ["C_v_mg_m3", "C_p_mg_m3", "C_tot_mg_m3"],
+                        "Concentración [mg/m3]", "Concentraciones en el tiempo")
+        figs.append(("concentraciones.png", f))
+
+    # ppm VOC
+    if "ppm_voc" in df:
+        f = plot_series(df, "t_s", ["ppm_voc"], "VOC [ppm]", "VOC (ppmv) en el tiempo")
+        figs.append(("voc_ppm.png", f))
+
+    # Caudal
+    if "Q_m3_s" in df:
+        f = plot_series(df, "t_s", ["Q_m3_s"], "Q [m3/s]", "Caudal en el tiempo")
+        figs.append(("Q.png", f))
+
+    # Velocidades
+    cols_v = [c for c in ["V_face_m_s", "v_duct_m_s"] if c in df]
+    if cols_v:
+        f = plot_series(df, "t_s", cols_v, "Velocidad [m/s]", "Velocidades características")
+        figs.append(("velocidades.png", f))
+
+    # Presiones y Potencia
+    if "DP_system_Pa" in df:
+        f = plot_series(df, "t_s", ["DP_system_Pa"], "ΔP sistema [Pa]", "Pérdida de presión del sistema")
+        figs.append(("dp_system.png", f))
+    if "P_electrica_W" in df:
+        f = plot_series(df, "t_s", ["P_electrica_W"], "Potencia [W]", "Consumo eléctrico")
+        figs.append(("power.png", f))
+
+    # Por especie: h_m(t), W_L(t), J_pared(t)
+    if sp_names:
+        f = plot_species_series(df, sp_names, "hm_", "t_s", "h_m [m/s]", "Coeficientes de transferencia de masa")
+        figs.append(("hm_species.png", f))
+        f = plot_species_series(df, sp_names, "W_L_", "t_s", "W(L) [mg/m3]", "Concentración a la salida por especie")
+        figs.append(("WL_species.png", f))
+        f = plot_species_series(df, sp_names, "Jwall_", "t_s", "J_pared [mg/m2/s]", "Flujo a pared por especie (aprox.)")
+        figs.append(("Jwall_species.png", f))
+
+    # Guardar
+    for fname, fig in figs:
+        fig_save(fig, out_dir, fname, dpi=args.dpi)
+
+    # Mostrar
+    if not args.no_show:
+        plt.show()
+    else:
+        # Cerrar figuras si no se muestran
+        for _, fig in figs:
+            plt.close(fig)
 
 if __name__ == "__main__":
     main()
