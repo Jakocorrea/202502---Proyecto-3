@@ -1,128 +1,104 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
 import math
 import json
 
-# -------------------------
-# Utilidades numéricas
-# -------------------------
+# -----------------------------
+# Helpers
+# -----------------------------
+
+def clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
 def lin_interp(x: float, xs: List[float], ys: List[float]) -> float:
-    """Interpolación lineal con manejo robusto de bordes."""
-    if len(xs) != len(ys):
-        raise ValueError("Xs y Ys deben tener la misma longitud.")
-    if len(xs) < 2:
-        raise ValueError("Se requieren al menos dos puntos para interpolar.")
-
-    # Asumimos xs ordenado ascendente; si no lo está, el llamador debe ordenar.
+    if len(xs) != len(ys) or len(xs) < 2:
+        raise ValueError("lin_interp: listas mal formadas")
     if x <= xs[0]:
-        x0, x1, y0, y1 = xs[0], xs[1], ys[0], ys[1]
-        return y0 if x1 == x0 else y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+        # extrapola linealmente con el primer segmento
+        x0,x1 = xs[0], xs[1]
+        y0,y1 = ys[0], ys[1]
+        return y0 + (y1-y0)*(x - x0)/(x1 - x0)
     if x >= xs[-1]:
-        x0, x1, y0, y1 = xs[-2], xs[-1], ys[-2], ys[-1]
-        return y1 if x1 == x0 else y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+        x0,x1 = xs[-2], xs[-1]
+        y0,y1 = ys[-2], ys[-1]
+        return y0 + (y1-y0)*(x - x0)/(x1 - x0)
+    # búsqueda binaria simple
+    lo, hi = 0, len(xs)-1
+    while hi-lo > 1:
+        mid = (lo+hi)//2
+        if xs[mid] <= x:
+            lo = mid
+        else:
+            hi = mid
+    x0,x1 = xs[lo], xs[hi]
+    y0,y1 = ys[lo], ys[hi]
+    if x1 == x0:
+        return y0
+    return y0 + (y1 - y0)*(x - x0)/(x1 - x0)
 
-    for i in range(1, len(xs)):
-        if x <= xs[i]:
-            x0, x1 = xs[i - 1], xs[i]
-            y0, y1 = ys[i - 1], ys[i]
-            return y0 if x1 == x0 else y0 + (y1 - y0) * (x - x0) / (x1 - x0)
-    return ys[-1]
+# -----------------------------
+# Aire y propiedades
+# -----------------------------
 
+R_UNIVERSAL = 8.314462618  # J/mol/K
+R_DRY = 287.058            # J/kg/K
+R_WV = 461.495             # J/kg/K
+P0_PA = 101325.0
 
-# -------------------------
-# Propiedades del aire y fricción
-# -------------------------
-def air_props_from_altitude(altitude_m: float, T_C: float) -> Tuple[float, float]:
-    """Densidad (kg/m3) y viscosidad (Pa·s) a altura ~ISA y T con Sutherland."""
-    g = 9.80665
-    R = 287.05287
+def pressure_at_altitude(alt_m: float, T_K: float) -> float:
+    """Modelo ISA simplificado (capa troposférica)"""
+    # si T_K no se conoce suficientemente, use 288.15 K nominal
     T0 = 288.15
-    p0 = 101325.0
-    L = 0.0065  # gradiente térmico
-    T = T_C + 273.15
-    if altitude_m < 0:
-        altitude_m = 0.0
-    h = altitude_m
-    factor = (1 - L * h / T0)
-    if factor <= 0:
-        factor = 1e-6
-    exponent = g / (R * L)
-    p = p0 * (factor ** exponent)
-    rho = p / (R * T)
+    L = 0.0065  # K/m
+    g0 = 9.80665
+    M = 0.0289644
+    R = R_UNIVERSAL
+    if alt_m < 11000:
+        return P0_PA * (1.0 - L*alt_m/T0)**(g0*M/(R*L))
+    else:
+        # aproximación grosera para >11 km
+        return P0_PA * math.exp(-g0*M*(alt_m-11000)/(R*T0)) * (1.0 - L*11000/T0)**(g0*M/(R*L))
 
-    # Sutherland
-    T0_suth = 273.15
+def sat_vapor_pressure_water(T_C: float) -> float:
+    """Tetens (Pa)"""
+    return 610.78 * math.exp((17.27*T_C)/(T_C + 237.3))
+
+def air_density_moist(P_Pa: float, T_K: float, RH: float) -> float:
+    """Densidad de aire húmedo (kg/m3) separando componentes seco/vapor."""
+    e = clamp(RH, 0.0, 1.0) * sat_vapor_pressure_water(T_K - 273.15)
+    Pd = P_Pa - e
+    rho = Pd/(R_DRY*T_K) + e/(R_WV*T_K)
+    return rho
+
+def mu_air_sutherland(T_K: float) -> float:
+    """Viscosidad dinámica del aire (Pa·s) usando Sutherland."""
+    T0 = 273.15
     mu0 = 1.716e-5
-    S = 110.4
-    mu = mu0 * ((T0_suth + S) / (T + S)) * (T / T0_suth) ** 1.5
-    return rho, mu
+    C = 111.0
+    return mu0 * ((T_K/T0)**1.5) * (T0 + C)/(T_K + C)
 
+# -----------------------------
+# Difusión y Antoine
+# -----------------------------
 
-def haaland_friction_factor(Re: float, eps_over_D: float) -> float:
-    """Factor de fricción de Haaland (turbulento) + laminar simple."""
-    if Re <= 0:
-        return 0.0
-    if Re < 2100:
-        return 64.0 / Re
-    if eps_over_D < 1e-12:
-        eps_over_D = 1e-12
-    inv_sqrt_f = -1.8 * math.log10((eps_over_D / 3.7) ** 1.11 + 6.9 / Re)
-    f = 1.0 / (inv_sqrt_f * inv_sqrt_f)
-    return f
+def D_Fuller_cm2_s(T_K: float, P_atm: float, Mi_g_mol: float, Mj_g_mol: float,
+                   vi_cm3_mol: float, vj_cm3_mol: float) -> float:
+    """
+    Fuller (gas-gas) coeficiente binario (cm2/s).
+    T en K, P en atm, M en g/mol, v (volúmenes de difusión) en cm3/mol.
+    """
+    return 0.001 * (T_K**1.75) * math.sqrt(1.0/Mi_g_mol + 1.0/Mj_g_mol) / (
+        P_atm * ((vi_cm3_mol**(1.0/3.0) + vj_cm3_mol**(1.0/3.0))**2)
+    )
 
+def antoine_P_bar(T_K: float, A: float, B: float, C: float) -> float:
+    """Forma: log10(P_bar) = A - B/(T_K + C)."""
+    return 10.0**(A - B/(T_K + C))
 
-# -------------------------
-# Elementos del sistema
-# -------------------------
-@dataclass
-class DuctSegment:
-    L: float
-    D: float
-    eps: float
-    K_minor: float
-
-    def dp(self, Q: float, rho: float, mu: float) -> float:
-        if self.D <= 0:
-            return 0.0
-        area = math.pi * (self.D ** 2) / 4.0
-        if area <= 0:
-            return 0.0
-        v = Q / area
-        Re = rho * v * self.D / (mu if mu > 0 else 1e-9)
-        f = haaland_friction_factor(Re, self.eps / self.D if self.D > 0 else 0.0)
-        dp_major = f * (self.L / self.D) * (rho * v * v / 2.0)
-        dp_minor = self.K_minor * (rho * v * v / 2.0)
-        return dp_major + dp_minor
-
-
-@dataclass
-class FanCurve:
-    Q_points: List[float]
-    DP_points: List[float]
-    def dp(self, Q: float) -> float:
-        return lin_interp(Q, self.Q_points, self.DP_points)
-
-
-@dataclass
-class FilterCurve:
-    Q_points: List[float]
-    DP0_points: List[float]
-    def dp0(self, Q: float) -> float:
-        return lin_interp(Q, self.Q_points, self.DP0_points)
-
-
-@dataclass
-class FilterModel:
-    curve: FilterCurve
-    alpha_Pa_per_kg: float
-    eta_filter: float
-    dp_max_Pa: float
-    def dp(self, Q: float, M_captured_kg: float) -> float:
-        # Aumento de ΔP con carga capturada; límite superior opcional
-        dp_val = self.curve.dp0(Q) + self.alpha_Pa_per_kg * max(0.0, M_captured_kg)
-        return min(dp_val, self.dp_max_Pa) if self.dp_max_Pa > 0 else dp_val
-
+# -----------------------------
+# Estructuras de configuración
+# -----------------------------
 
 @dataclass
 class Geometry:
@@ -131,75 +107,61 @@ class Geometry:
     H: float
     area_face: float
     volume: Optional[float] = None
-    def get_volume(self) -> float:
-        return self.volume if self.volume and self.volume > 0 else self.L * self.A * self.H
-
+    type: str = "cross-draft"
+    def get_V(self) -> float:
+        return self.volume if (self.volume and self.volume > 0) else (self.A * self.H)
 
 @dataclass
-class Air:
+class AirConfig:
     altitude_m: float
     T_C: float
     RH: float
     rho: Optional[float] = None
     mu: Optional[float] = None
-    def props(self) -> Tuple[float, float]:
-        if (self.rho is not None) and (self.mu is not None):
-            return self.rho, self.mu
-        rho, mu = air_props_from_altitude(self.altitude_m, self.T_C)
-        rho = self.rho if self.rho is not None else rho
-        mu = self.mu if self.mu is not None else mu
-        return rho, mu
 
+@dataclass
+class Duct:
+    L: float
+    D: float
+    eps: float
+    K: float
+
+@dataclass
+class InOutExtras:
+    K_extra: float = 0.0
+
+@dataclass
+class FilterConfig:
+    dp0_curve: Dict[str, List[float]]  # keys: Q, DP (Pa)
+    alpha_Pa_per_kg: float = 0.0       # aumento de ΔP por masa capturada
+    eta_filter: float = 0.9            # eficiencia para aerosol
+    dp_max_Pa: float = 0.0
+
+    def dp0(self, Q_m3_s: float) -> float:
+        return lin_interp(Q_m3_s, self.dp0_curve["Q"], self.dp0_curve["DP"])
+
+@dataclass
+class FanConfig:
+    curve: Dict[str, List[float]]      # keys: Q, DP (Pa)
+    eta_fan: float = 0.6
+    eta_motor: float = 0.9
+    def dp(self, Q_m3_s: float) -> float:
+        return lin_interp(Q_m3_s, self.curve["Q"], self.curve["DP"])
 
 @dataclass
 class Pistol:
-    q_l_mL_min: float
-    rho_l_kg_L: float
-    w_s: float
-    TE: float
-    f_evap_fast: float
-    f_aer: float
-    k_ev_s_inv: float = 0.0
-    name: str = ""
-    M_liq_reservoir_kg: float = 0.0
+    name: str
+    q_l_mL_min: float       # flujo líquido
+    rho_l_kg_L: float       # densidad líquido
+    w_s: float              # fracción másica solventes del líquido
+    TE: float               # transfer efficiency (a la pieza)
+    f_evap_fast: float      # fracción de solvente que volatiliza inmediato
+    f_aer: float            # fracción que sale como aerosol (del total emitido al aire)
+    k_ev_s_inv: float       # cinética 1er orden de evaporación remanente
 
-    def mass_flows(self, is_on: bool) -> Tuple[float, float, float]:
-        """
-        Retorna (m_vapor_kg_s, m_aer_kg_s, m_reservorio_add_kg_s)
-        Considera evaporación rápida (on) + lenta (reservorio) y overspray -> aerosol.
-        """
-        m_vapor = 0.0
-        m_aer = 0.0
-        m_res_add = 0.0
-
-        # Evaporación lenta desde reservorio
-        m_vapor_slow = self.k_ev_s_inv * self.M_liq_reservoir_kg
-
-        if is_on:
-            # Flujo líquido alimentado
-            m_liq = (self.q_l_mL_min * 1e-3 / 60.0) * self.rho_l_kg_L  # kg/s
-            m_solvent = m_liq * max(0.0, min(1.0, self.w_s))
-            m_vapor_fast = m_solvent * max(0.0, min(1.0, self.f_evap_fast))
-
-            # Overspray (no depositado en sustrato)
-            m_overspray = m_liq * (1.0 - max(0.0, min(1.0, self.TE)))
-            m_nonvapor_overspray = m_overspray * (1.0 - max(0.0, min(1.0, self.f_evap_fast)))
-            m_aer = m_nonvapor_overspray * max(0.0, min(1.0, self.f_aer))
-
-            m_vapor = m_vapor_fast + m_vapor_slow
-            # Lo que no se evapora ni pasa a aerosol, se acumula en reservorio
-            m_res_add = max(0.0, m_liq - (m_vapor_fast + m_aer))
-            self.M_liq_reservoir_kg += m_res_add - m_vapor_slow
-        else:
-            # Solo hay evaporación lenta del reservorio
-            m_vapor = m_vapor_slow
-            self.M_liq_reservoir_kg -= m_vapor_slow
-
-        if self.M_liq_reservoir_kg < 0:
-            self.M_liq_reservoir_kg = 0.0
-
-        return m_vapor, m_aer, m_res_add
-
+@dataclass
+class SourceConfig:
+    pistols: List[Pistol]
 
 @dataclass
 class Task:
@@ -208,42 +170,11 @@ class Task:
     repetitions: int
     active_pistols: List[int]
 
-
 @dataclass
 class Schedule:
     tasks: List[Task]
     n_tasks_day: int = 1
     purge_s: float = 0.0
-
-    def total_duration_s(self) -> float:
-        base = 0.0
-        for t in self.tasks:
-            base += (t.t_on_s + t.t_off_s) * t.repetitions
-        base *= max(1, self.n_tasks_day)
-        base += max(0.0, self.purge_s)
-        return base
-
-    def is_on(self, t: float) -> Tuple[bool, List[int]]:
-        day_cycle = 0.0
-        expanded: List[Tuple[str, float, List[int]]] = []
-        for _ in range(max(1, self.n_tasks_day)):
-            for task in self.tasks:
-                expanded.append(("on", task.t_on_s, task.active_pistols))
-                expanded.append(("off", task.t_off_s, []))
-                day_cycle += task.t_on_s + task.t_off_s
-        purge = self.purge_s
-        total = day_cycle + purge
-        if total <= 0:
-            return False, []
-
-        t_mod = t % total
-        elapsed = 0.0
-        for kind, dur, pist in expanded:
-            if t_mod < elapsed + dur:
-                return (True, pist) if kind == "on" else (False, [])
-            elapsed += dur
-        return False, []
-
 
 @dataclass
 class Criteria:
@@ -253,343 +184,555 @@ class Criteria:
     LFL_ppm: Optional[float] = None
     v_duct_obj: Optional[float] = None
 
-
 @dataclass
 class CaptureFiltering:
-    eta_capt_source: float = 0.0
-    k_dep_s_inv: float = 0.0
-
+    eta_capt_source: float = 0.0  # captura local de aerosol
+    k_dep_s_inv: float = 0.0      # depósito (paredes/suelo), 1/s
 
 @dataclass
-class FilterState:
-    M_captured_kg: float = 0.0
+class SimSetup:
+    dt_s: float = 1.0
+    t_end_s: float = 3600.0
+    Q_fixed_m3_s: Optional[float] = None
 
+# ---------- Mezcla / Especies (nuevo) -------------
+
+@dataclass
+class Species:
+    name: str
+    M_g_mol: float
+    v_Fuller_cm3_mol: float
+    Antoine: Tuple[float, float, float]  # (A,B,C) bar-form
+    x_liq: float                         # fracción molar en líquido
+    LFL_vol_frac: Optional[float] = None # como fracción (e.g., 0.03 para 3% v/v)
+
+@dataclass
+class MixtureConfig:
+    species: List[Species] = field(default_factory=list)
+
+# Paquete de config
 
 @dataclass
 class SystemConfig:
     geometry: Geometry
-    air: Air
-    ducts: List[DuctSegment]
-    fan: FanCurve
-    filter_model: FilterModel
+    air: AirConfig
+    ducts: List[Duct]
+    inout: InOutExtras
+    filter: FilterConfig
+    fan: FanConfig
+    source: SourceConfig
     schedule: Schedule
-    pistols: List[Pistol]
     criteria: Criteria
-    capture_filtering: CaptureFiltering
-    K_extra: float = 0.0
-    Q_fixed_m3_s: Optional[float] = None
-    # Compat: eficiencias del conjunto ventilador+motor
-    eta_fan: Optional[float] = None
-    eta_motor: Optional[float] = None
-    # Para soportar JSONs antiguos que tenían bloque separado
-    fan_eff: Optional[Dict[str, float]] = None
+    capture: CaptureFiltering
+    sim: SimSetup
+    mixture: MixtureConfig
 
+# -----------------------------
+# Utilidades hidráulicas
+# -----------------------------
 
-# -------------------------
-# Núcleo de simulación
-# -------------------------
+def reynolds(rho: float, v: float, D: float, mu: float) -> float:
+    if mu <= 0 or D <= 0:
+        return 0.0
+    return rho * v * D / mu
+
+def friction_factor(Re: float, eps: float, D: float) -> float:
+    if Re <= 0:
+        return 0.0
+    if Re < 2300:
+        return 64.0/Re
+    # Swamee-Jain
+    return 0.25 / (math.log10(eps/(3.7*D) + 5.74/(Re**0.9))**2)
+
+def duct_dp(Q: float, rho: float, mu: float, duct: Duct) -> Tuple[float, float, float]:
+    A = math.pi * (duct.D**2) / 4.0
+    v = Q / A if A > 0 else 0.0
+    Re = reynolds(rho, v, duct.D, mu)
+    f = friction_factor(Re, duct.eps, duct.D)
+    dp = (f * duct.L / duct.D + duct.K) * 0.5 * rho * v * v
+    return dp, v, Re
+
+# -----------------------------
+# Simulador
+# -----------------------------
+
 class Simulator:
     def __init__(self, cfg: SystemConfig):
         self.cfg = cfg
-        self.filter_state = FilterState()
-        self.rho, self.mu = self.cfg.air.props()
-        self.V = self.cfg.geometry.get_volume()
+        # estado dinámico
+        self.state = {
+            "t": 0.0,
+            "C_v_mg_m3": 0.0,
+            "C_p_mg_m3": 0.0,
+            "M_captured_kg": 0.0,
+        }
+        # masa remanente líquida por pistola (que evapora lentamente)
+        self.residual_liq_kg = [0.0 for _ in cfg.source.pistols]
 
-    # --- hidráulica ---
-    def dp_network(self, Q: float) -> float:
-        rho, mu = self.rho, self.mu
-        dp = 0.0
-        for seg in self.cfg.ducts:
-            dp += seg.dp(Q, rho, mu)
-        if self.cfg.ducts:
-            D = self.cfg.ducts[0].D
-            area = math.pi * (D ** 2) / 4.0
-            v = Q / area if area > 0 else 0.0
-            dp += self.cfg.K_extra * (rho * v * v / 2.0)
-        return dp
+        # propiedades de aire (si no fueron dadas)
+        self.P_Pa, self.T_K, self.rho_air, self.mu_air = self._init_air()
 
-    def dp_filter(self, Q: float) -> float:
-        return self.cfg.filter_model.dp(Q, self.filter_state.M_captured_kg)
+        # preparar constantes especie/mezcla
+        self._prep_mixture()
 
-    def dp_system(self, Q: float) -> float:
-        return self.dp_network(Q) + self.dp_filter(Q)
+    # -------- aire --------
+    def _init_air(self) -> Tuple[float, float, float, float]:
+        ac = self.cfg.air
+        T_K = ac.T_C + 273.15
+        P = pressure_at_altitude(ac.altitude_m, T_K)
+        rho = ac.rho if (ac.rho and ac.rho>0) else air_density_moist(P, T_K, ac.RH/100.0)
+        mu = ac.mu if (ac.mu and ac.mu>0) else mu_air_sutherland(T_K)
+        return P, T_K, rho, mu
 
-    def fan_dp(self, Q: float) -> float:
-        return self.cfg.fan.dp(Q)
+    # -------- mezcla --------
+    def _default_species(self) -> List[Species]:
+        # Defaults razonables (A,B,C en bar) -> estos deben revisarse/ajustarse si se dispone de datos exactos
+        # Nombres: Etanol, Acetato de propilo, 1-propanol, Isopropanol
+        return [
+            Species("Ethanol", 46.07, 41.0, (5.24677, 1598.673, -46.424), 0.40, 0.033),
+            Species("Propyl acetate", 102.13, 92.0, (5.02029, 1474.76, -39.27), 0.25, 0.018),
+            Species("1-Propanol", 60.10, 54.0, (5.20184, 1731.53, -46.29), 0.25, 0.022),
+            Species("Isopropanol", 60.10, 56.0, (5.12705, 1683.125, -46.86), 0.10, 0.020),
+        ]
 
-    def find_operating_Q(self) -> float:
-        """Resuelve la intersección curva ventilador vs. sistema (bisección con fallback)."""
-        Qmin = 0.0
-        Qmax = max(self.cfg.fan.Q_points) * 1.2
+    def _prep_mixture(self):
+        if not self.cfg.mixture.species:
+            self.cfg.mixture.species = self._default_species()
+        # normaliza x_liq
+        tot = sum(sp.x_liq for sp in self.cfg.mixture.species)
+        if tot <= 0:
+            n = len(self.cfg.mixture.species)
+            for sp in self.cfg.mixture.species:
+                sp.x_liq = 1.0/n
+        else:
+            for sp in self.cfg.mixture.species:
+                sp.x_liq /= tot
 
-        def f(Q):
-            return self.fan_dp(Q) - self.dp_system(Q)
+    # -------- filtros/ventilador --------
+    def filter_dp(self, Q: float) -> float:
+        fc = self.cfg.filter
+        base = fc.dp0(Q)
+        dp = base + fc.alpha_Pa_per_kg * max(0.0, self.state["M_captured_kg"])
+        return min(dp, fc.dp_max_Pa) if fc.dp_max_Pa and fc.dp_max_Pa>0 else dp
 
-        fmin = f(Qmin)
-        fmax = f(Qmax)
-        # Si no hay cambio de signo, probamos muestreo y tomamos el mínimo residuo.
-        if fmin * fmax > 0:
-            samples = 50
-            best_Q, best_val = Qmin, abs(fmin)
-            for i in range(1, samples + 1):
-                q = Qmin + (Qmax - Qmin) * i / samples
-                val = abs(f(q))
-                if val < best_val:
-                    best_Q, best_val = q, val
-            return best_Q
+    def system_dp_without_fan(self, Q: float) -> Tuple[float, float, float, List[Dict[str,float]]]:
+        """Retorna ΔP total (ductos + extras + filtro) y diagnósticos"""
+        rho, mu = self.rho_air, self.mu_air
+        total_dp = 0.0
+        v_re_list = []
+        for d in self.cfg.ducts:
+            dp_i, v_i, Re_i = duct_dp(Q, rho, mu, d)
+            total_dp += dp_i
+            v_re_list.append({"D": d.D, "v": v_i, "Re": Re_i, "dp": dp_i})
+        # extras (inlets/outlets)
+        Ke = self.cfg.inout.K_extra if self.cfg.inout else 0.0
+        if Ke and Ke > 0:
+            # usar diámetro de la primera sección para velocidad de referencia
+            if self.cfg.ducts:
+                D0 = self.cfg.ducts[0].D
+                A0 = math.pi*D0*D0/4
+                v0 = Q/A0 if A0>0 else 0.0
+                total_dp += 0.5*self.rho_air * v0*v0 * Ke
+        # filtro
+        total_dp += self.filter_dp(Q)
+        return total_dp, (v_re_list[0]["v"] if v_re_list else 0.0), (v_re_list[0]["Re"] if v_re_list else 0.0), v_re_list
 
-        # Bisección
-        a, b = Qmin, Qmax
-        for _ in range(60):
-            c = 0.5 * (a + b)
-            fc = f(c)
-            if abs(fc) < 1e-3:
-                return c
-            if f(a) * fc <= 0:
-                b = c
+    def find_operating_Q(self) -> Tuple[float, Dict[str, float], List[Dict[str, float]]]:
+        """Encuentra Q tal que DP_fan(Q) = DP_sistema(Q)."""
+        fan = self.cfg.fan
+
+        # límites de búsqueda según curvas
+        Qmin = max(0.0, min(fan.curve["Q"]))
+        Qmax = max(fan.curve["Q"])
+        # ampliar un poco el rango por robustez
+        Qlo = 0.0
+        Qhi = Qmax*1.2
+
+        def F(Q: float) -> float:
+            sys_dp, _, _, _ = self.system_dp_without_fan(Q)
+            return fan.dp(Q) - sys_dp
+
+        # bisección simple
+        f_lo = F(Qlo)
+        f_hi = F(Qhi)
+        # si no cambian de signo, trata un punto medio de la curva
+        if f_lo*f_hi > 0:
+            Q_try = 0.5*(Qmin + Qmax)
+            return Q_try, {"DP_fan_Pa": fan.dp(Q_try), "DP_sys_Pa": self.system_dp_without_fan(Q_try)[0]}, []
+
+        for _ in range  (60):
+            mid = 0.5*(Qlo + Qhi)
+            f_mid = F(mid)
+            if abs(f_mid) < 1e-3:
+                break
+            if f_lo * f_mid <= 0:
+                Qhi = mid
+                f_hi = f_mid
             else:
-                a = c
-        return 0.5 * (a + b)
+                Qlo = mid
+                f_lo = f_mid
+        Q = 0.5*(Qlo + Qhi)
+        sys_dp, v0, Re0, v_re_list = self.system_dp_without_fan(Q)
+        return Q, {"DP_fan_Pa": fan.dp(Q), "DP_sys_Pa": sys_dp, "v_duct0_m_s": v0, "Re_duct0": Re0}, v_re_list
 
-    # --- emisiones y dinámica de concentraciones ---
+    # -------- emisiones --------
+
+    def _task_active(self, t: float, task: Task) -> bool:
+        """Devuelve si en el ciclo actual de 'task' el sistema está 'on'."""
+        period = task.t_on_s + task.t_off_s
+        if period <= 0 or task.repetitions <= 0:
+            return False
+        # tiempo relativo dentro del bloque total de repeticiones
+        t_mod = t % (period * task.repetitions)
+        # en cada periodo, activo si t_mod % period < t_on_s
+        return (t_mod % period) < task.t_on_s
+
     def emissions_step(self, t: float) -> Tuple[float, float]:
-        """
-        Devuelve (S_vapor_mg_s, S_aerosol_mg_s).
-        Aplica captura en la fuente (eta_capt_source).
-        """
-        on, active = self.cfg.schedule.is_on(t)
-        S_vapor_kg_s = 0.0
-        S_aer_kg_s = 0.0
+        """Retorna (S_vapor_kg_s, S_aer_kg_s). Maneja evaporación lenta remanente."""
+        S_vapor = 0.0
+        S_aer = 0.0
+        # contribuciones de pistolas activas
+        active_any = False
+        for ti, task in enumerate(self.cfg.schedule.tasks):
+            if self._task_active(t, task):
+                active_any = True
+                for pidx in task.active_pistols:
+                    p = self.cfg.source.pistols[pidx]
+                    q_L_s = (p.q_l_mL_min/1000.0)/60.0  # L/s
+                    m_liq_kg_s = q_L_s * p.rho_l_kg_L
+                    m_solvent_kg_s = m_liq_kg_s * p.w_s * (1.0 - p.TE)  # fracción que NO se queda en pieza
+                    # división inmediata
+                    S_vapor += p.f_evap_fast * m_solvent_kg_s
+                    S_aer   += p.f_aer * m_solvent_kg_s
+                    # remanente a "piso/superficie" que luego evapora
+                    rem = max(0.0, m_solvent_kg_s - (p.f_evap_fast + p.f_aer)*m_solvent_kg_s)
+                    self.residual_liq_kg[pidx] += rem
+        # evaporación lenta de remanente
+        for i, p in enumerate(self.cfg.source.pistols):
+            if self.residual_liq_kg[i] > 0 and p.k_ev_s_inv > 0:
+                evap = min(self.residual_liq_kg[i], self.residual_liq_kg[i]*p.k_ev_s_inv)
+                self.residual_liq_kg[i] -= evap
+                S_vapor += evap
 
-        if on:
-            for idx in active:
-                if 0 <= idx < len(self.cfg.pistols):
-                    m_vap, m_aer, _ = self.cfg.pistols[idx].mass_flows(True)
-                    S_vapor_kg_s += m_vap
-                    S_aer_kg_s += m_aer
-        else:
-            # off: solo evaporación lenta desde los reservorios
-            for p in self.cfg.pistols:
-                m_vap, m_aer, _ = p.mass_flows(False)
-                S_vapor_kg_s += m_vap
+        # captura en la fuente para el aerosol
+        eta_capt = clamp(self.cfg.capture.eta_capt_source, 0.0, 1.0)
+        S_aer_air = S_aer * (1.0 - eta_capt)
+        return S_vapor, S_aer_air
 
-        # Captura en la fuente reduce el aerosol que entra al recinto
-        eta_capt = max(0.0, min(1.0, self.cfg.capture_filtering.eta_capt_source))
-        S_aer_kg_s *= (1.0 - eta_capt)
+    # -------- especies/equilibrio + coef. transferencia --------
 
-        # Convertir a mg/s
-        return 1e6 * S_vapor_kg_s, 1e6 * S_aer_kg_s
+    def species_equilibrium_gas(self) -> Dict[str, float]:
+        """Fracciones molares en gas por Raoult ideal: y_i = x_i P_sat / P."""
+        P_bar = self.P_Pa/1e5
+        T = self.T_K
+        y = {}
+        tot = 0.0
+        for sp in self.cfg.mixture.species:
+            A,B,C = sp.Antoine
+            Psat_bar = antoine_P_bar(T, A,B,C)
+            yi = (sp.x_liq * Psat_bar) / (P_bar if P_bar>0 else 1.0)
+            # evitar negativos/rangos raros si la ecuación no aplica
+            yi = max(0.0, yi)
+            y[sp.name] = yi
+            tot += yi
+        # normalizar si la suma supera 1 (casos fuera de rango)
+        if tot > 1.0:
+            for k in y:
+                y[k] /= tot
+            tot = 1.0
+        y["AIR"] = max(0.0, 1.0 - tot)
+        return y
 
-    def step_dynamics(self, state: Dict[str, float], dt: float, t: float) -> Dict[str, float]:
-        V = self.V
+    def diffusion_matrix_fuller(self) -> Dict[Tuple[str,str], float]:
+        """D_ij (cm^2/s) para todas las parejas de especies y aire."""
+        P_atm = self.P_Pa / 101325.0
+        T = self.T_K
+        # añadimos "Air" con M y v de Fuller típicos
+        M_air = 28.97
+        v_air = 20.1
+        species = list(self.cfg.mixture.species)
+        # matriz contra aire y entre solventes
+        names = [sp.name for sp in species] + ["AIR"]
+        Ms = [sp.M_g_mol for sp in species] + [M_air]
+        vs = [sp.v_Fuller_cm3_mol for sp in species] + [v_air]
+        D = {}
+        for i in range(len(names)):
+            for j in range(len(names)):
+                if i==j:
+                    continue
+                Dij = D_Fuller_cm2_s(T, P_atm, Ms[i], Ms[j], vs[i], vs[j])
+                D[(names[i], names[j])] = Dij
+        return D
+
+    def D_i_mix(self, y: Dict[str,float], D: Dict[Tuple[str,str], float]) -> Dict[str, float]:
+        """Difusividad efectiva de cada especie (cm2/s) ignorando término con sí misma."""
+        names = [sp.name for sp in self.cfg.mixture.species]
+        out = {}
+        for i in names:
+            denom = 0.0
+            for j in names + ["AIR"]]:
+                if j == i:
+                    continue
+                yj = y.get(j, 0.0)
+                Dij = D.get((i,j), 1e3)  # fallback grande
+                if Dij <= 0:
+                    Dij = 1e-12
+                denom += yj / Dij
+            if denom <= 0:
+                out[i] = 1.0  # cm2/s
+            else:
+                out[i] = 1.0/denom
+        return out
+
+    def mass_transfer_coeffs(self, Q: float) -> Dict[str, float]:
+        """h_m por especie (m/s) vía Sherwood en placa plana a partir del face velocity."""
+        geom = self.cfg.geometry
+        u = Q / (geom.area_face if geom.area_face>0 else 1.0)  # m/s
+        nu = self.mu_air / self.rho_air  # m2/s
+        ReL = u * geom.L / (nu if nu>0 else 1e-9)
+        y = self.species_equilibrium_gas()
+        Dmat = self.diffusion_matrix_fuller()
+        D_i = self.D_i_mix(y, Dmat)  # cm2/s
+        hm = {}
+        for sp in self.cfg.mixture.species:
+            Di_m2_s = D_i[sp.name] * 1e-4  # cm2/s -> m2/s
+            Sc = nu/Di_m2_s if Di_m2_s>0 else 1e12
+            if ReL < 5e5:
+                Sh = 0.664 * (ReL**0.5) * (Sc**(1.0/3.0))
+            else:
+                Sh = 0.037 * (ReL**0.8) * (Sc**(1.0/3.0)) - 871.0 * (Sc**(1.0/3.0))
+            hm[sp.name] = Sh * Di_m2_s / geom.L  # m/s
+        return hm
+
+    # -------- paso dinámico --------
+
+    def step(self, dt: float) -> Dict[str, float]:
+        cfg = self.cfg
+        geom = cfg.geometry
+        V = geom.get_V()
+
         # Caudal
-        if self.cfg.Q_fixed_m3_s is not None and self.cfg.Q_fixed_m3_s > 0:
-            Q = self.cfg.Q_fixed_m3_s
+        if cfg.sim.Q_fixed_m3_s and cfg.sim.Q_fixed_m3_s > 0:
+            Q = cfg.sim.Q_fixed_m3_s
+            diag_fan = {"DP_fan_Pa": self.cfg.fan.dp(Q), "DP_sys_Pa": self.system_dp_without_fan(Q)[0],
+                        "v_duct0_m_s": (self.system_dp_without_fan(Q)[1])}
+            v_re_list = self.system_dp_without_fan(Q)[3]
         else:
-            Q = self.find_operating_Q()
+            Q, diag_fan, v_re_list = self.find_operating_Q()
 
-        # Fuentes (mg/s)
-        S_v_mg_s, S_p_mg_s = self.emissions_step(t)
+        # Emisiones (kg/s)
+        S_v_kg_s, S_p_kg_s = self.emissions_step(self.state["t"])
 
-        # Balance (C_v: vapor, C_p: partículas/aerosol)
-        lambda_v = Q / V
-        lambda_p = Q / V + max(0.0, self.cfg.capture_filtering.k_dep_s_inv)
-        C_v = state["C_v_mg_m3"] + dt * ((S_v_mg_s / V) - lambda_v * state["C_v_mg_m3"])
-        C_p = state["C_p_mg_m3"] + dt * ((S_p_mg_s / V) - lambda_p * state["C_p_mg_m3"])
-        if C_v < 0:
-            C_v = 0.0
-        if C_p < 0:
-            C_p = 0.0
+        # ODEs para concentraciones (mg/m3)
+        C_v = self.state["C_v_mg_m3"]
+        C_p = self.state["C_p_mg_m3"]
+        sink_dep = cfg.capture.k_dep_s_inv
 
-        # Captura en filtro (solo de la fracción particulada C_p)
-        eta_filter = max(0.0, min(1.0, self.cfg.filter_model.eta_filter))
-        m_to_filter_mg_s = Q * state["C_p_mg_m3"]  # mg/s que pasan por el filtro
-        m_captured_kg = state["M_captured_kg"] + dt * (eta_filter * m_to_filter_mg_s) * 1e-6
+        dC_v = (S_v_kg_s*1e6)/V - (Q/V)*C_v - sink_dep*C_v
+        dC_p = (S_p_kg_s*1e6)/V - (Q/V)*C_p - sink_dep*C_p
 
-        # Hidráulica y potencias
-        dp_filt = self.dp_filter(Q)
-        dp_net = self.dp_network(Q)
-        dp_sys = dp_net + dp_filt
+        C_v_next = max(0.0, C_v + dt*dC_v)
+        C_p_next = max(0.0, C_p + dt*dC_p)
 
-        eta_fan = self.cfg.eta_fan if (self.cfg.eta_fan is not None) else 0.6
-        eta_motor = self.cfg.eta_motor if (self.cfg.eta_motor is not None) else 0.9
-        denom = max(1e-6, (eta_fan * eta_motor))
-        P_e_W = (Q * dp_sys) / denom
+        # captura en filtro (aerosol en ducto)
+        eta_f = clamp(cfg.filter.eta_filter, 0.0, 1.0)
+        captured_kg_s = eta_f * Q * (C_p_next/1e6)  # kg/s
+        self.state["M_captured_kg"] += captured_kg_s * dt
 
-        # Velocidades de interés
-        V_face = Q / max(1e-9, self.cfg.geometry.area_face)
-        if self.cfg.ducts:
-            D0 = self.cfg.ducts[0].D
-            A0 = math.pi * D0 * D0 / 4.0
-            v_duct = Q / max(1e-9, A0)
+        # actualizar estado
+        self.state["C_v_mg_m3"] = C_v_next
+        self.state["C_p_mg_m3"] = C_p_next
+        self.state["t"] += dt
+
+        # diagnósticos extra (especies, hm, perfiles 1D simplificados)
+        y_eq = self.species_equilibrium_gas()
+        # masa molar promedio para ppm y partición de C_v
+        names = [sp.name for sp in cfg.mixture.species]
+        Mavg = sum(y_eq[n]*sp.M_g_mol for n,sp in zip(names, cfg.mixture.species))
+        Mavg = Mavg if Mavg>0 else 60.0
+        n_tot = self.P_Pa/(R_UNIVERSAL*self.T_K)  # mol/m3
+        # ppmv total solvente usando C_v
+        y_voc = ((C_v_next/1000.0)/Mavg) / n_tot  # mol/mol
+        ppm_voc = max(0.0, y_voc*1e6)
+
+        # reparto por especie proporcional a y_eq (solo para diagnóstico de perfiles)
+        tot_y_solvs = sum(y_eq.get(sp.name,0.0) for sp in cfg.mixture.species)
+        C_i = {}
+        if tot_y_solvs > 0:
+            for sp in cfg.mixture.species:
+                frac = y_eq.get(sp.name,0.0)/tot_y_solvs
+                C_i[sp.name] = frac * C_v_next
         else:
-            v_duct = 0.0
+            for sp in cfg.mixture.species:
+                C_i[sp.name] = 0.0
 
-        return {
+        hm = self.mass_transfer_coeffs(Q)
+        u_face = Q/(geom.area_face if geom.area_face>0 else 1.0)
+
+        # perfil simplificado: W(L) ≈ W0 * exp(-h_m*L/u)
+        W_L = {}
+        J0 = {}
+        for sp in cfg.mixture.species:
+            h = max(0.0, hm.get(sp.name, 0.0))
+            if u_face > 0:
+                W_L[sp.name] = C_i[sp.name] * math.exp(-h * geom.L / u_face)
+            else:
+                W_L[sp.name] = C_i[sp.name]
+            # flujo de pared aproximado (mg/m2/s) usando gradiente película ~ h * C
+            J0[sp.name] = h * C_i[sp.name]  # mg/(m2·s) si interpretamos 'C' como 'concentración másica'
+
+        # Potencia eléctrica estimada (W)
+        dp = diag_fan.get("DP_sys_Pa", 0.0)  # en equilibrio con el ventilador
+        P_shaft = Q * dp / max(cfg.fan.eta_fan, 1e-6)
+        P_elec = P_shaft / max(cfg.fan.eta_motor, 1e-6)
+
+        # velocidades representativas
+        v_duct0 = diag_fan.get("v_duct0_m_s", 0.0)
+
+        # salida por paso
+        out = {
+            "t_s": self.state["t"],
             "Q_m3_s": Q,
-            "V_face_m_s": V_face,
-            "v_duct_m_s": v_duct,
-            "C_v_mg_m3": C_v,
-            "C_p_mg_m3": C_p,
-            "C_tot_mg_m3": C_v + C_p,
-            "DP_filter_Pa": dp_filt,
-            "DP_network_Pa": dp_net,
-            "DP_system_Pa": dp_sys,
-            "P_e_W": P_e_W,
-            "M_captured_kg": m_captured_kg,
+            "V_face_m_s": u_face,
+            "v_duct_m_s": v_duct0,
+            "DP_system_Pa": diag_fan.get("DP_sys_Pa", 0.0),
+            "DP_fan_Pa": diag_fan.get("DP_fan_Pa", 0.0),
+            "C_v_mg_m3": C_v_next,
+            "C_p_mg_m3": C_p_next,
+            "C_tot_mg_m3": C_v_next + C_p_next,
+            "ppm_voc": ppm_voc,
+            "P_electrica_W": P_elec,
+            "M_captured_kg": self.state["M_captured_kg"],
         }
 
-    def run(self, t_end_s: float, dt_s: float) -> Tuple[List[Dict[str, float]], Dict[str, float]]:
-        # Compat con JSONs que traen bloque 'fan_eff'
-        if self.cfg.fan_eff:
-            self.cfg.eta_fan = self.cfg.fan_eff.get("eta_fan", 0.6)
-            self.cfg.eta_motor = self.cfg.fan_eff.get("eta_motor", 0.9)
+        # añadir especies/hm/perfil (claves extendidas)
+        for sp in cfg.mixture.species:
+            nm = sp.name
+            out[f"C_{nm}_mg_m3"] = C_i[nm]
+            out[f"W_L_{nm}_mg_m3"] = W_L[nm]
+            out[f"hm_{nm}_m_s"] = hm.get(nm, 0.0)
+            out[f"Jwall_{nm}_mg_m2_s"] = J0[nm]
 
-        state = {"C_v_mg_m3": 0.0, "C_p_mg_m3": 0.0, "M_captured_kg": 0.0}
-        ts: List[Dict[str, float]] = []
-        t = 0.0
-        energy_Wh = 0.0
+        # criterios (banderas)
+        if cfg.criteria.V_face_obj is not None:
+            out["ok_V_face"] = (u_face >= cfg.criteria.V_face_obj)
+        if cfg.criteria.v_duct_obj is not None:
+            out["ok_v_duct"] = (v_duct0 >= cfg.criteria.v_duct_obj)
+        if cfg.criteria.C_limit_mg_m3 is not None:
+            out["ok_C_limit"] = (C_v_next <= cfg.criteria.C_limit_mg_m3)
+        if cfg.criteria.LFL_ppm is not None:
+            out["ok_LFL"] = (ppm_voc <= cfg.criteria.LFL_ppm)
 
-        while t <= t_end_s + 1e-9:
-            out = self.step_dynamics(state, dt_s, t)
-            energy_Wh += out["P_e_W"] * dt_s / 3600.0
-            ts.append(dict(time_s=t, **out))
-            # Avanzar estado
-            state["C_v_mg_m3"] = out["C_v_mg_m3"]
-            state["C_p_mg_m3"] = out["C_p_mg_m3"]
-            state["M_captured_kg"] = out["M_captured_kg"]
-            t += dt_s
+        # guarda algunos diagnósticos de ductos (primer segmento)
+        if v_re_list:
+            out["Re_duct0"] = v_re_list[0]["Re"]
+            out["dp_duct0_Pa"] = v_re_list[0]["dp"]
 
-        # Resumen
-        max_C = max((r["C_tot_mg_m3"] for r in ts), default=0.0)
-        avg_C = sum((r["C_tot_mg_m3"] for r in ts), 0.0) / (len(ts) if ts else 1.0)
-        max_DP = max((r["DP_system_Pa"] for r in ts), default=0.0)
-        final_DP_filter = ts[-1]["DP_filter_Pa"] if ts else 0.0
+        return out
 
-        summary = {
-            "t_end_s": t_end_s,
-            "dt_s": dt_s,
-            "energy_kWh": energy_Wh / 1000.0,
-            "C_total_mg_m3_max": max_C,
-            "C_total_mg_m3_avg": avg_C,
-            "DP_system_Pa_max": max_DP,
-            "DP_filter_Pa_final": final_DP_filter,
-            "M_captured_kg_final": state["M_captured_kg"],
-        }
-        return ts, summary
+    def run(self, dt: Optional[float]=None, t_end: Optional[float]=None) -> List[Dict[str, float]]:
+        dt = dt if (dt is not None) else self.cfg.sim.dt_s
+        t_end = t_end if (t_end is not None) else self.cfg.sim.t_end_s
+        out = []
+        while self.state["t"] < t_end - 1e-9:
+            out.append(self.step(dt))
+        return out
 
-
-# -------------------------
-# Carga de configuración
-# -------------------------
-def _read_curve(curve: Dict) -> Tuple[List[float], List[float]]:
-    Q = list(curve.get("Q", []))
-    DP = list(curve.get("DP", []))
-    if not Q or not DP or len(Q) != len(DP):
-        raise ValueError("Curve requiere arreglos 'Q' y 'DP' de igual longitud.")
-    pairs = sorted(zip(Q, DP), key=lambda x: x[0])
-    Qs, DPs = [p[0] for p in pairs], [p[1] for p in pairs]
-    return Qs, DPs
-
+# -----------------------------
+# Lectura de configuración
+# -----------------------------
 
 def config_from_dict(d: Dict) -> SystemConfig:
-    # Geometría / aire
-    geomd = d["geometry"]
-    geometry = Geometry(L=geomd["L"], A=geomd["A"], H=geomd["H"],
-                        area_face=geomd["area_face"],
-                        volume=geomd.get("volume"))
-    aird = d["air"]
-    air = Air(altitude_m=aird["altitude_m"], T_C=aird["T_C"],
-              RH=aird.get("RH", 50.0),
-              rho=aird.get("rho"), mu=aird.get("mu"))
-
-    # Ductos
-    ducts: List[DuctSegment] = []
-    for seg in d.get("ducts", []):
-        ducts.append(DuctSegment(L=seg["L"], D=seg["D"], eps=seg["eps"], K_minor=seg.get("K", 0.0)))
-
-    # Curvas
-    Qf, DPf = _read_curve(d["fan"]["curve"])
-    fan = FanCurve(Q_points=Qf, DP_points=DPf)
-    Qc, DP0c = _read_curve(d["filter"]["dp0_curve"])
-    flt_curve = FilterCurve(Q_points=Qc, DP0_points=DP0c)
-    filter_model = FilterModel(
-        curve=flt_curve,
-        alpha_Pa_per_kg=d["filter"].get("alpha_Pa_per_kg", 0.0),
-        eta_filter=d["filter"].get("eta_filter", 0.9),
-        dp_max_Pa=d["filter"].get("dp_max_Pa", 1200.0),
+    # geometry
+    g = d.get("geometry", {})
+    geometry = Geometry(
+        L = g.get("L", 2.0),
+        A = g.get("A", 3.0),
+        H = g.get("H", 2.5),
+        area_face = g.get("area_face", 1.8),
+        volume = g.get("volume", None),
+        type = g.get("type", "cross-draft"),
     )
-
-    # Programa (schedule)
-    tasks: List[Task] = []
-    for t in d["schedule"]["tasks"]:
-        tasks.append(Task(
-            t_on_s=t["t_on_s"],
-            t_off_s=t["t_off_s"],
-            repetitions=t["repetitions"],
-            active_pistols=list(t.get("active_pistols", []))
-        ))
-    schedule = Schedule(
-        tasks=tasks,
-        n_tasks_day=d["schedule"].get("n_tasks_day", 1),
-        purge_s=d["schedule"].get("purge_s", 0.0),
+    # air
+    a = d.get("air", {})
+    air = AirConfig(
+        altitude_m = a.get("altitude_m", 0.0),
+        T_C = a.get("T_C", 20.0),
+        RH = a.get("RH", 50.0),
+        rho = a.get("rho", None),
+        mu = a.get("mu", None),
     )
-
-    # Pistolas
-    pistols: List[Pistol] = []
-    for i, p in enumerate(d["source"]["pistols"]):
-        pistols.append(Pistol(
-            q_l_mL_min=p["q_l_mL_min"],
-            rho_l_kg_L=p["rho_l_kg_L"],
-            w_s=p["w_s"],
-            TE=p["TE"],
-            f_evap_fast=p["f_evap_fast"],
-            f_aer=p["f_aer"],
-            k_ev_s_inv=p.get("k_ev_s_inv", 0.0),
-            name=p.get("name", f"pistol_{i+1}"),
-        ))
-
-    # Criterios y captura
-    crd = d.get("criteria", {})
+    # ducts
+    ducts = [Duct(**dd) for dd in d.get("ducts", [])]
+    # in/out
+    inout = InOutExtras(**d.get("inlets_outlets", {"K_extra": 0.0}))
+    # filter
+    filt = d.get("filter", {})
+    filter_cfg = FilterConfig(
+        dp0_curve = filt.get("dp0_curve", {"Q":[0.0, 0.5, 1.0], "DP":[0.0, 50.0, 150.0]}),
+        alpha_Pa_per_kg = filt.get("alpha_Pa_per_kg", 0.0),
+        eta_filter = filt.get("eta_filter", 0.9),
+        dp_max_Pa = filt.get("dp_max_Pa", 0.0),
+    )
+    # fan
+    fan = d.get("fan", {})
+    fan_cfg = FanConfig(
+        curve = fan.get("curve", {"Q":[0.0, 0.5, 1.0, 1.5], "DP":[800.0, 700.0, 400.0, 150.0]}),
+        eta_fan = fan.get("eta_fan", 0.6),
+        eta_motor = fan.get("eta_motor", 0.9),
+    )
+    # source
+    ps = [Pistol(**pp) for pp in d.get("source", {}).get("pistols", [])]
+    source = SourceConfig(ps)
+    # schedule
+    tasks = [Task(**tt) for tt in d.get("schedule", {}).get("tasks", [])]
+    schedule = Schedule(tasks=tasks,
+                        n_tasks_day=d.get("schedule",{}).get("n_tasks_day",1),
+                        purge_s=d.get("schedule",{}).get("purge_s",0.0))
+    # criteria
+    cr = d.get("criteria", {})
     criteria = Criteria(
-        V_face_obj=crd.get("V_face_obj"),
-        ACH_obj=crd.get("ACH_obj"),
-        C_limit_mg_m3=crd.get("C_limit_mg_m3"),
-        LFL_ppm=crd.get("LFL_ppm"),
-        v_duct_obj=crd.get("v_duct_obj"),
+        V_face_obj = cr.get("V_face_obj", None),
+        ACH_obj = cr.get("ACH_obj", None),
+        C_limit_mg_m3 = cr.get("C_limit_mg_m3", None),
+        LFL_ppm = cr.get("LFL_ppm", None),
+        v_duct_obj = cr.get("v_duct_obj", None),
     )
-    capd = d.get("capture_filtering", {})
-    capture_filtering = CaptureFiltering(
-        eta_capt_source=capd.get("eta_capt_source", 0.0),
-        k_dep_s_inv=capd.get("k_dep_s_inv", 0.0),
+    # capture
+    cap = d.get("capture_filtering", {})
+    capture = CaptureFiltering(
+        eta_capt_source = cap.get("eta_capt_source", 0.0),
+        k_dep_s_inv = cap.get("k_dep_s_inv", 0.0),
     )
-
-    # Varios
-    K_extra = d.get("inlets_outlets", {}).get("K_extra", 0.0)
-    Q_fixed = d.get("sim", {}).get("Q_fixed_m3_s", None)
-
-    # Eficiencias ventilador/motor (soporta bloque legado fan_eff)
-    fan_eff = d.get("fan_eff", {"eta_fan": d["fan"].get("eta_fan", 0.6),
-                                "eta_motor": d["fan"].get("eta_motor", 0.9)})
-
-    cfg = SystemConfig(
-        geometry=geometry,
-        air=air,
-        ducts=ducts,
-        fan=fan,
-        filter_model=filter_model,
-        schedule=schedule,
-        pistols=pistols,
-        criteria=criteria,
-        capture_filtering=capture_filtering,
-        K_extra=K_extra,
-        Q_fixed_m3_s=Q_fixed,
-        eta_fan=fan_eff.get("eta_fan", 0.6),
-        eta_motor=fan_eff.get("eta_motor", 0.9),
-        fan_eff=fan_eff,
+    # sim
+    sm = d.get("sim", {})
+    sim = SimSetup(
+        dt_s = sm.get("dt_s", 1.0),
+        t_end_s = sm.get("t_end_s", 3600.0),
+        Q_fixed_m3_s = sm.get("Q_fixed_m3_s", None),
     )
-    return cfg
+    # mixture
+    mix = d.get("mixture", None)
+    if mix and "species" in mix:
+        sp_list = []
+        for sd in mix["species"]:
+            sp_list.append(Species(
+                name=sd["name"],
+                M_g_mol=sd["M_g_mol"],
+                v_Fuller_cm3_mol=sd["v_Fuller_cm3_mol"],
+                Antoine=tuple(sd["Antoine"]),
+                x_liq=sd.get("x_liq", 0.0),
+                LFL_vol_frac=sd.get("LFL_vol_frac", None)
+            ))
+        mixture = MixtureConfig(sp_list)
+    else:
+        mixture = MixtureConfig([])
 
+    return SystemConfig(
+        geometry=geometry, air=air, ducts=ducts, inout=inout,
+        filter=filter_cfg, fan=fan_cfg, source=source, schedule=schedule,
+        criteria=criteria, capture=capture, sim=sim, mixture=mixture
+    )
 
 def config_from_json(path: str) -> SystemConfig:
     with open(path, "r", encoding="utf-8") as f:
