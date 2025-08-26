@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -17,7 +18,6 @@ Uso:
 from __future__ import annotations
 from typing import Dict, List, Optional, Tuple
 import argparse
-import os
 from pathlib import Path
 import traceback
 
@@ -108,12 +108,14 @@ def plot_species_series(df: pd.DataFrame, species: List[str], base_key: str,
                         x_key: str, ylabel: str, title: str) -> plt.Figure:
     """base_key: 'hm_', 'W_L_', 'Jwall_', 'C_'"""
     fig, ax = plt.subplots(figsize=(8, 4.5))
+
     def colname(nm: str) -> str:
         if base_key == "hm_":
             return f"hm_{nm}_m_s"
         if base_key in ("W_L_", "C_"):
             return f"{base_key}{nm}_mg_m3"
         return f"Jwall_{nm}_mg_m2_s"
+
     for nm in species:
         col = colname(nm)
         if col in df.columns:
@@ -177,12 +179,12 @@ def main():
     peak_ppm   = df["ppm_voc"].max() if "ppm_voc" in df else 0.0
     t_peak_ppm = float(df.loc[df["ppm_voc"].idxmax(), "t_s"]) if "ppm_voc" in df else 0.0
 
-    e_Wh = (df.get("P_electrica_W", 0.0) * df["dt"] / 3600.0).sum() if "P_electrica_W" in df else 0.0
+    e_Wh = (df["P_electrica_W"] * df["dt"] / 3600.0).sum() if "P_electrica_W" in df else 0.0
 
     eta_f = float(max(0.0, min(1.0, cfg.filter.eta_filter)))
-    ex_vap_kg = (df["Q_m3_s"] * (df["C_v_mg_m3"]/1e6) * df["dt"]).sum() if {"Q_m3_s","C_v_mg_m3"}.issubset(df.columns) else 0.0
-    ex_aer_kg = ((1.0 - eta_f) * df["Q_m3_s"] * (df["C_p_mg_m3"]/1e6) * df["dt"]).sum() if {"Q_m3_s","C_p_mg_m3"}.issubset(df.columns) else 0.0
-    cap_filt_kg = (eta_f * df["Q_m3_s"] * (df["C_p_mg_m3"]/1e6) * df["dt"]).sum() if {"Q_m3_s","C_p_mg_m3"}.issubset(df.columns) else 0.0
+    ex_vap_kg = (df["Q_m3_s"] * (df["C_v_mg_m3"]/1e6) * df["dt"]).sum() if {"Q_m3_s","C_v_mg_m3","dt"}.issubset(df.columns) else 0.0
+    ex_aer_kg = ((1.0 - eta_f) * df["Q_m3_s"] * (df["C_p_mg_m3"]/1e6) * df["dt"]).sum() if {"Q_m3_s","C_p_mg_m3","dt"}.issubset(df.columns) else 0.0
+    cap_filt_kg = (eta_f * df["Q_m3_s"] * (df["C_p_mg_m3"]/1e6) * df["dt"]).sum() if {"Q_m3_s","C_p_mg_m3","dt"}.issubset(df.columns) else 0.0
 
     summary_df = pd.DataFrame([{
         "Q_prom [m3/s]": avg_Q,
@@ -199,6 +201,31 @@ def main():
     }]).round(6)
     print_table("RESUMEN GENERAL", summary_df)
     df_save(summary_df, out_dir, "summary.csv")
+
+    # ------------------ TABLA · REYNOLDS ------------------
+    if "Re_duct0" in df.columns:
+        Re_min  = float(df["Re_duct0"].min())
+        Re_max  = float(df["Re_duct0"].max())
+        Re_mean = float(df["Re_duct0"].mean())
+
+        # % de tiempo en cada régimen (ponderado por dt)
+        tot_t = float(df["dt"].sum()) if "dt" in df else max(1.0, len(df))
+        mask_lam  = (df["Re_duct0"] < 2300)
+        mask_tran = (df["Re_duct0"] >= 2300) & (df["Re_duct0"] < 4000)
+        t_lam  = float((mask_lam  * df["dt"]).sum()) if "dt" in df else float(mask_lam.sum())
+        t_tran = float((mask_tran * df["dt"]).sum()) if "dt" in df else float(mask_tran.sum())
+        t_turb = max(0.0, tot_t - t_lam - t_tran)
+
+        reynolds_df = pd.DataFrame([{
+            "Re_min": Re_min,
+            "Re_prom": Re_mean,
+            "Re_max": Re_max,
+            "%_laminar(<2300)": 100.0 * t_lam  / tot_t,
+            "%_transición(2300-4000)": 100.0 * t_tran / tot_t,
+            "%_turbulento(>4000)": 100.0 * t_turb / tot_t
+        }]).round(3)
+        print_table("REYNOLDS · DIAGNÓSTICO", reynolds_df)
+        df_save(reynolds_df, out_dir, "reynolds_metrics.csv")
 
     # ------------------ TABLAS POR ESPECIE ------------------
 
@@ -248,36 +275,49 @@ def main():
                         "Concentración [mg/m3]", "Concentraciones en el tiempo")
         ))
 
-    if "ppm_voc" in df:
+    if "ppm_voc" in df.columns:
         figs.append((
             "voc_ppm.png",
             plot_series(df, "t_s", ["ppm_voc"], "VOC [ppm]", "VOC (ppmv) en el tiempo")
         ))
 
-    if "Q_m3_s" in df:
+    if "Q_m3_s" in df.columns:
         figs.append((
             "Q.png",
             plot_series(df, "t_s", ["Q_m3_s"], "Q [m3/s]", "Caudal en el tiempo")
         ))
 
-    cols_v = [c for c in ["V_face_m_s", "v_duct_m_s"] if c in df]
+    cols_v = [c for c in ["V_face_m_s", "v_duct_m_s"] if c in df.columns]
     if cols_v:
         figs.append((
             "velocidades.png",
             plot_series(df, "t_s", cols_v, "Velocidad [m/s]", "Velocidades características")
         ))
 
-    if "DP_system_Pa" in df:
+    if "DP_system_Pa" in df.columns:
         figs.append((
             "dp_system.png",
             plot_series(df, "t_s", ["DP_system_Pa"], "ΔP sistema [Pa]", "Pérdida de presión del sistema")
         ))
 
-    if "P_electrica_W" in df:
+    if "P_electrica_W" in df.columns:
         figs.append((
             "power.png",
             plot_series(df, "t_s", ["P_electrica_W"], "Potencia [W]", "Consumo eléctrico")
         ))
+
+    # Número de Reynolds (ducto 0)
+    if "Re_duct0" in df.columns:
+        fig, ax = plt.subplots(figsize=(8, 4.5))
+        ax.plot(df["t_s"], df["Re_duct0"], label="Re_duct0")
+        ax.axhline(2300, linestyle="--", linewidth=1)
+        ax.axhline(4000, linestyle="--", linewidth=1)
+        ax.set_xlabel("t [s]")
+        ax.set_ylabel("Reynolds [-]")
+        ax.set_title("Número de Reynolds en el ducto (laminar <2300, transición 2300–4000, turbulento >4000)")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        figs.append(("reynolds.png", fig))
 
     if sp_names:
         figs.append((
