@@ -130,7 +130,7 @@ def plot_species_series(df: pd.DataFrame, species: List[str], base_key: str,
 
 def main():
     parser = argparse.ArgumentParser(description="Graficador/Tabulador para la simulación de cabina.")
-    parser.add_argument("-c", "--config", type=str, default="example_config_A_no_filter.json", help="Ruta del JSON de configuración.")
+    parser.add_argument("-c", "--config", type=str, default="example_config_B_cleaning_vfd.json", help="Ruta del JSON de configuración.")
     parser.add_argument("--dt", type=float, default=None, help="Paso de tiempo [s] (override).")
     parser.add_argument("--t_end", type=float, default=None, help="Tiempo final [s] (override).")
     parser.add_argument("--q_fixed", type=float, default=None, help="Caudal fijo [m3/s] (override).")
