@@ -1,141 +1,183 @@
-import argparse
-import json
-import sys
-from typing import Tuple, Dict, Any
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
+import argparse
+from typing import Dict, List
 from sim_logic import config_from_json, Simulator
 
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        description="Ejecuta la simulación de la cabina de pintura usando un archivo JSON de configuración."
-    )
-    p.add_argument(
-        "-c", "--config", default="example_config.json",
-        help="Ruta al archivo de configuración JSON (por defecto: example_config.json)"
-    )
-    p.add_argument(
-        "--dt", type=float, default=None,
-        help="Paso de tiempo [s] para sobreescribir el del JSON."
-    )
-    p.add_argument(
-        "--t_end", type=float, default=None,
-        help="Tiempo total de simulación [s] para sobreescribir el del JSON."
-    )
-    p.add_argument(
-        "--print_rows", type=int, default=5,
-        help="Número de filas iniciales de resultado a imprimir (por defecto: 5)"
-    )
-    return p.parse_args()
+
+def fmt_bool(b: object) -> str:
+    return "OK" if bool(b) else "NO"
 
 
-def load_sim_params(path: str, override_dt: float | None, override_t_end: float | None) -> Tuple[float, float, Dict[str, Any]]:
-    with open(path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
-    simsec = raw.get("sim", {}) if isinstance(raw, dict) else {}
-    dt = float(simsec.get("dt_s", 1.0)) if override_dt is None else float(override_dt)
-    t_end = float(simsec.get("t_end_s", 3600.0)) if override_t_end is None else float(override_t_end)
-    return dt, t_end, raw
-
-
-def evaluate_criteria(cfg, results: list[dict]) -> dict:
-    """Evalúa criterios básicos (si están definidos en el JSON)."""
-    out = {}
-    if not results:
-        return out
-
-    # Métricas agregadas
-    min_v_face = min(r["V_face_m_s"] for r in results)
-    min_v_duct = min(r["v_duct_m_s"] for r in results)
-    max_C_tot = max(r["C_tot_mg_m3"] for r in results)
-
-    crit = cfg.criteria
-    if crit.V_face_obj is not None:
-        out["V_face_obj"] = {
-            "target_m_s": crit.V_face_obj,
-            "min_observed_m_s": min_v_face,
-            "ok": min_v_face >= crit.V_face_obj
-        }
-    if crit.v_duct_obj is not None:
-        out["v_duct_obj"] = {
-            "target_m_s": crit.v_duct_obj,
-            "min_observed_m_s": min_v_duct,
-            "ok": min_v_duct >= crit.v_duct_obj
-        }
-    if crit.C_limit_mg_m3 is not None:
-        out["C_limit_mg_m3"] = {
-            "limit_mg_m3": crit.C_limit_mg_m3,
-            "max_observed_mg_m3": max_C_tot,
-            "ok": max_C_tot <= crit.C_limit_mg_m3
-        }
-    return out
-
+def sdiv(num: float, den: float, default: float = 0.0) -> float:
+    """División segura para evitar ZeroDivisionError."""
+    return num/den if den not in (0, 0.0) else default
 
 def main():
-    args = parse_args()
+    parser = argparse.ArgumentParser(description="Simulación de cabina de pintura (dinámico + especies).")
+    parser.add_argument("--config", "-c", type=str, default="example_config.json",
+                        help="Ruta al archivo JSON de configuración.")
+    parser.add_argument("--dt", type=float, default=None, help="Paso de tiempo [s] (override).")
+    parser.add_argument("--t_end", type=float, default=None, help="Tiempo final [s] (override).")
+    parser.add_argument("--q_fixed", type=float, default=None, help="Caudal fijo [m3/s] (override).")
+    parser.add_argument("--print_every", type=int, default=60, help="Frecuencia de impresión [s].")
+    args = parser.parse_args()
 
-    try:
-        # 1) Cargar parámetros de simulación (dt, t_end) desde JSON con posibles overrides
-        dt_s, t_end_s, raw_json = load_sim_params(args.config, args.dt, args.t_end)
+    cfg = config_from_json(args.config)
+    if args.dt is not None:      cfg.sim.dt_s = args.dt
+    if args.t_end is not None:   cfg.sim.t_end_s = args.t_end
+    if args.q_fixed is not None: cfg.sim.Q_fixed_m3_s = args.q_fixed
 
-        # 2) Construir configuración del sistema (sim_logic ya gestiona compatibilidad fan/fan_eff)
-        cfg = config_from_json(args.config)
+    # Normaliza algunos parámetros defensivamente
+    if cfg.sim.dt_s <= 0:
+        cfg.sim.dt_s = 1.0
+    if cfg.sim.t_end_s < 0:
+        cfg.sim.t_end_s = 0.0
+    if args.print_every <= 0:
+        args.print_every = 60
 
-        # 3) Ejecutar simulación
-        sim = Simulator(cfg)
-        results, summary = sim.run(t_end_s=t_end_s, dt_s=dt_s)
+    sim = Simulator(cfg)
 
-        # 4) Imprimir resumen principal
-        print("\n=== RESUMEN DE SIMULACIÓN ===")
-        print(f"Archivo de configuración: {args.config}")
-        print(f"t_end_s = {t_end_s:.3f}  |  dt_s = {dt_s:.3f}")
-        print(f"Volumen cabina [m³]: {cfg.geometry.get_volume():.3f}")
-        print(f"Ductos: {len(cfg.ducts)}  |  Área de cara [m²]: {cfg.geometry.area_face:.3f}")
-        print("\n— Energía —")
-        print(f"Energía consumida [kWh]: {summary.get('energy_kWh', 0.0):.4f}")
-        print("\n— Presiones —")
-        print(f"ΔP sistema máx [Pa]: {summary.get('DP_system_Pa_max', 0.0):.2f}")
-        print(f"ΔP filtro final [Pa]: {summary.get('DP_filter_Pa_final', 0.0):.2f}")
-        print("\n— Concentraciones —")
-        print(f"C_total máx [mg/m³]: {summary.get('C_total_mg_m3_max', 0.0):.3f}")
-        print(f"C_total prom [mg/m³]: {summary.get('C_total_mg_m3_avg', 0.0):.3f}")
-        print(f"Masa capturada final en filtro [kg]: {summary.get('M_captured_kg_final', 0.0):.6f}")
+    sp_names = [sp.name for sp in cfg.mixture.species]
+    eta_filter = max(0.0, min(1.0, cfg.filter.eta_filter))
 
-        # 5) Evaluación contra criterios (si existen en el JSON)
-        checks = evaluate_criteria(cfg, results)
-        if checks:
-            print("\n=== EVALUACIÓN DE CRITERIOS ===")
-            for k, v in checks.items():
-                if k == "V_face_obj":
-                    print(f"Velocidad de cara — objetivo: {v['target_m_s']:.3f} m/s | "
-                          f"mín obs: {v['min_observed_m_s']:.3f} m/s | OK: {v['ok']}")
-                elif k == "v_duct_obj":
-                    print(f"Velocidad en ducto — objetivo: {v['target_m_s']:.3f} m/s | "
-                          f"mín obs: {v['min_observed_m_s']:.3f} m/s | OK: {v['ok']}")
-                elif k == "C_limit_mg_m3":
-                    print(f"Concentración — límite: {v['limit_mg_m3']:.3f} mg/m³ | "
-                          f"máx obs: {v['max_observed_mg_m3']:.3f} mg/m³ | OK: {v['ok']}")
+    # Integrales y acumuladores
+    t = 0.0
+    dt = cfg.sim.dt_s
+    t_end = cfg.sim.t_end_s
 
-        # 6) Muestra de las primeras filas
-        n = max(0, int(args.print_rows))
-        if n > 0 and results:
-            cols = ["time_s", "Q_m3_s", "V_face_m_s", "v_duct_m_s",
-                    "C_tot_mg_m3", "DP_system_Pa", "P_e_W"]
-            print("\n=== PRIMERAS FILAS ===")
-            header = " | ".join(f"{c:>14}" for c in cols)
-            print(header)
-            print("-" * len(header))
-            for row in results[:n]:
-                print(" | ".join(f"{row.get(c, 0):14.6f}" if isinstance(row.get(c, 0), (int, float))
-                                 else f"{str(row.get(c, '')):>14}" for c in cols))
+    m_exhaust_vap_kg = 0.0
+    m_exhaust_aer_kg = 0.0
+    m_captured_filter_kg = 0.0
+    e_electrica_Wh = 0.0
+    m_exhaust_species_kg = {nm: 0.0 for nm in sp_names}
 
-    except FileNotFoundError:
-        print(f"Error: no se encontró el archivo de configuración '{args.config}'.", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        print("Error al ejecutar la simulación:", str(e), file=sys.stderr)
-        sys.exit(2)
+    sum_Q = 0.0
+    sum_v_face = 0.0
+    sum_v_duct = 0.0
+    n_steps = 0
 
+    peak_C_tot = 0.0
+    peak_ppm = 0.0
+    peak_dict: Dict[str, float] = {}
+
+    # Encabezado
+    print("== Simulación iniciada ==")
+    print(f"dt = {dt:.3f} s, t_end = {t_end:.1f} s, q_fixed = {cfg.sim.Q_fixed_m3_s}")
+    print("-"*80)
+    print("t[s]   Q[m3/s]  Vface[m/s]  Vduct[m/s]  C_v[mg/m3]  C_p[mg/m3]  C_tot[mg/m3]  ppm_VOC  P[W]")
+
+    next_print = 0.0
+    last_step = None  # ← clave: snapshot del último paso
+
+    # Bucle de simulación
+    while t < t_end - 1e-12:
+        step = sim.step(dt)
+        last_step = step  # ← siempre actualiza
+        t = step["t_s"]
+        Q = step["Q_m3_s"]
+        Vface = step["V_face_m_s"]
+        Vduct = step.get("v_duct_m_s", 0.0)
+        C_v = step["C_v_mg_m3"]
+        C_p = step["C_p_mg_m3"]
+        C_tot = step["C_tot_mg_m3"]
+        ppm = step["ppm_voc"]
+        P = step["P_electrica_W"]
+
+        if t >= next_print - 1e-9:
+            print(f"{t:6.1f}  {Q:7.3f}    {Vface:7.3f}    {Vduct:7.3f}   {C_v:9.2f}   {C_p:9.2f}   {C_tot:11.2f}  {ppm:7.1f}  {P:7.0f}")
+            next_print += args.print_every
+
+        # Integrales
+        m_exhaust_vap_kg       += Q * (C_v/1e6) * dt
+        m_exhaust_aer_kg       += (1.0 - eta_filter) * Q * (C_p/1e6) * dt
+        m_captured_filter_kg   += eta_filter * Q * (C_p/1e6) * dt
+
+        # Por especie (vapor)
+        for nm in sp_names:
+            Ci = step.get(f"C_{nm}_mg_m3", 0.0)
+            m_exhaust_species_kg[nm] += Q * (Ci/1e6) * dt
+
+        # Energía eléctrica
+        e_electrica_Wh += (P * dt) / 3600.0
+
+        # Promedios
+        sum_Q += Q
+        sum_v_face += Vface
+        sum_v_duct += Vduct
+        n_steps += 1
+
+        # Picos
+        if C_tot > peak_C_tot:
+            peak_C_tot = C_tot
+            peak_dict["peak_C_tot_t"] = t
+        if ppm > peak_ppm:
+            peak_ppm = ppm
+            peak_dict["peak_ppm_t"] = t
+
+    # Si no hubo pasos (p. ej., t_end = 0), generamos un snapshot sin avanzar tiempo:
+    if last_step is None:
+        last_step = sim.step(0.0)  # dt=0 → no avanza el reloj interno
+        # No acumulamos integrales ni promedios; sólo usamos para diagnóstico/imprimir
+
+    # Resumen
+    print("\n" + "="*80)
+    print("RESUMEN")
+    print("-"*80)
+    avg_Q      = sdiv(sum_Q, n_steps, default=last_step.get("Q_m3_s", 0.0))
+    avg_v_face = sdiv(sum_v_face, n_steps, default=last_step.get("V_face_m_s", 0.0))
+    avg_v_duct = sdiv(sum_v_duct, n_steps, default=last_step.get("v_duct_m_s", 0.0))
+    print(f"Promedios:   Q = {avg_Q:.3f} m3/s | V_face = {avg_v_face:.3f} m/s | V_duct = {avg_v_duct:.3f} m/s")
+
+    if n_steps > 0:
+        print(f"Concentración pico: C_tot = {peak_C_tot:.2f} mg/m3 @ t = {peak_dict.get('peak_C_tot_t', 0):.1f} s")
+        print(f"VOC pico: {peak_ppm:.1f} ppm @ t = {peak_dict.get('peak_ppm_t', 0):.1f} s")
+    else:
+        # Con t_end=0 no hay evolución; reportamos el snapshot
+        print("Concentración pico: (sin evolución temporal; usando snapshot t=0)")
+        print(f"C_tot = {last_step.get('C_tot_mg_m3', 0.0):.2f} mg/m3, VOC = {last_step.get('ppm_voc', 0.0):.1f} ppm")
+
+    print(f"Energía eléctrica ≈ {e_electrica_Wh:.1f} Wh")
+    print("-"*80)
+    print("Balances de emisión (integrados):")
+    print(f"  Vapor a descarga (kg):   {m_exhaust_vap_kg:.6f}")
+    print(f"  Aerosol a descarga (kg): {m_exhaust_aer_kg:.6f}")
+    print(f"  Capturado en filtro (kg):{m_captured_filter_kg:.6f}   (sim state = {sim.state['M_captured_kg']:.6f})")
+    print("-"*80)
+    print("Especies (vapor) → masa descargada [kg]:")
+    for nm in sp_names:
+        print(f"  - {nm:18s}: {m_exhaust_species_kg[nm]:.6f}")
+
+    # Criterios (del último snapshot disponible)
+    crit_lines: List[str] = []
+    if "ok_V_face" in last_step:
+        crit_lines.append(f"V_face ≥ obj: {fmt_bool(last_step['ok_V_face'])}")
+    if "ok_v_duct" in last_step:
+        crit_lines.append(f"V_duct ≥ obj: {fmt_bool(last_step['ok_v_duct'])}")
+    if "ok_C_limit" in last_step:
+        crit_lines.append(f"C_v ≤ límite: {fmt_bool(last_step['ok_C_limit'])}")
+    if "ok_LFL" in last_step:
+        crit_lines.append(f"PPM ≤ LFL:    {fmt_bool(last_step['ok_LFL'])}")
+
+    if crit_lines:
+        print("-"*80)
+        print("Criterios (snapshot final):")
+        for line in crit_lines:
+            print(" ", line)
+
+    # Diagnóstico de transferencia y perfiles al final
+    print("-"*80)
+    print("Coeficientes h_m y perfiles a la salida (snapshot final):")
+    for nm in sp_names:
+        hm = last_step.get(f"hm_{nm}_m_s", 0.0)
+        WL = last_step.get(f"W_L_{nm}_mg_m3", 0.0)
+        Jw = last_step.get(f"Jwall_{nm}_mg_m2_s", 0.0)
+        print(f"  {nm:18s}  h_m={hm:.5e} m/s | W(L)={WL:.2f} mg/m3 | J_pared≈{Jw:.3f} mg/m2/s")
+
+    print("="*80)
+    print("== Fin de la simulación ==")
 
 if __name__ == "__main__":
     main()

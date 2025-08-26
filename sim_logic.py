@@ -639,7 +639,7 @@ class Simulator:
         return out
 
 # -----------------------------
-# Lectura de configuración
+# | Lectura de configuración  |
 # -----------------------------
 
 def config_from_dict(d: Dict) -> SystemConfig:
