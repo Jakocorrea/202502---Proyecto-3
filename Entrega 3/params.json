@@ -1,10 +1,21 @@
 {
   "Lx": 6.0,
-  "Ly": 3.0,
-  "rho": 1.2,
-  "c_in": 0.0,
-  "m_dot": 0.0001,
-  "fan": { "U0": 0.2, "U_target": 0.35, "tau_s": 5.0 },
-  "spray": { "t_on": 0.0, "t_off": 6.0 },
-  "time": { "t_end": 50.0, "dt": 0.05 }
+  "Ly": 1.0,
+
+  "rho_air_in": 1.225,
+  "U_air_in": 0.2,
+
+  "rho_paint_in": 0.5,
+  "Q_paint_in": 0.00000133,
+
+  "fan": {
+    "type": "constant",
+    "Q_fan_m2_per_h": 780.0
+  },
+
+  "mix_tau_s": 3.0,
+
+  "time": { "t_end": 1800.0, "dt": 0.05 },
+
+  "init": { "c0": 0.0, "rho0": 1.225 }
 }
