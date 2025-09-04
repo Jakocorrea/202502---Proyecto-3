@@ -1,5 +1,5 @@
 # run_sim.py
-# Resultados: (1) concentración promedio vs tiempo, (2) velocidad del fluido vs tiempo
+# (1) concentración en el tiempo  (2) velocidad del fluido en el tiempo
 import matplotlib.pyplot as plt
 from sim_logic import simulate
 

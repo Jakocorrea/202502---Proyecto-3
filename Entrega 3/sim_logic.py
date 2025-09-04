@@ -1,22 +1,19 @@
 # sim_logic.py
-# Modelo 0-D (mezcla bien agitada) con ventilador dinámico:
+# Modelo 0-D (mezcla bien agitada) con ventilador dinámico en velocidad:
 #   V = Lx*Ly (por unidad de profundidad)
-#   Q(t): caudal 2D del ventilador con rampa de 1er orden
-#     dQ/dt = (Q_target - Q)/tau_s
-#   U(t) = Q(t) / Ly
-#   Ecuación para fracción másica promedio c(t):
-#     d/dt (rho*V*c) = rho*Q(t)*(c_in - c) + m_dot(t)
-#   => dc/dt = (Q(t)/V)*(c_in - c) + m_dot(t)/(rho*V)
+#   Q(t) = U(t) * Ly
+#   dU/dt = (U_target - U)/tau_s     (si hay bloque "fan")
+#   c'(t) = (Q(t)/V)*(c_in - c) + m_dot(t)/(rho*V)
 
 import json
 import numpy as np
 
-def load_params(path="params.json"):
+def load_params(path="Entrega 3/params.json"):
     with open(path, "r") as f:
         return json.load(f)
 
 def gate_spray(params, t):
-    """1 si el spray está ON en el tiempo t; 0 si está OFF."""
+    """1 si el spray está ON en t; 0 si OFF. Si no hay 'spray', está siempre ON."""
     sp = params.get("spray", None)
     if sp is None:
         return 1.0
@@ -34,9 +31,9 @@ def simulate(params_path="params.json"):
     # Geometría y propiedades
     Lx = float(P["Lx"]); Ly = float(P["Ly"])
     V  = Lx * Ly                         # m^3 por unidad de profundidad (2D)
-    rho = float(P.get("rho", 1.2))       # kg/m^3 (aire aprox)
+    rho = float(P.get("rho", 1.2))       # kg/m^3 (aire aprox.)
 
-    # Ingreso / fuente
+    # Entrada / fuente
     c_in  = float(P.get("c_in", 0.0))
     m_dot = float(P.get("m_dot", 0.0))   # kg/s (2D)
 
@@ -45,15 +42,25 @@ def simulate(params_path="params.json"):
     t_end = float(P["time"]["t_end"])
     nsteps = int(np.ceil(t_end / dt))
 
-    # Dinámica del ventilador (si no hay bloque "fan", Q es constante)
+    # Dinámica del ventilador: preferir U0/U_target (m/s); fallback a Q0/Q_target (m^2/s)
     if "fan" in P:
-        Q  = float(P["fan"].get("Q0", 0.0))         # m^2/s (estado inicial)
-        Q_target = float(P["fan"].get("Q_target", Q))
-        tau_s = max(1e-9, float(P["fan"].get("tau_s", 3.0)))  # s
+        fan = P["fan"]
+        if "U0" in fan:       U = float(fan["U0"])
+        elif "Q0" in fan:     U = float(fan["Q0"]) / Ly
+        else:                 U = float(P.get("Q", 0.0)) / Ly  # si hubiera Q fijo
+
+        if "U_target" in fan: U_target = float(fan["U_target"])
+        elif "Q_target" in fan: U_target = float(fan["Q_target"]) / Ly
+        else:                 U_target = U
+
+        tau_s = max(1e-9, float(fan.get("tau_s", 3.0)))
+        dynamic_fan = True
     else:
-        Q = float(P["Q"])
-        Q_target = Q
-        tau_s = None  # sin dinámica: Q(t) = Q
+        # Sin bloque 'fan': velocidad fija a partir de Q
+        U = float(P["Q"]) / Ly
+        U_target = U
+        tau_s = None
+        dynamic_fan = False
 
     # Estado inicial
     c = 0.0
@@ -66,28 +73,27 @@ def simulate(params_path="params.json"):
     # Guardar t=0
     t_hist[0] = 0.0
     c_hist[0] = c
-    u_hist[0] = Q / Ly
+    u_hist[0] = U
 
     for n in range(1, nsteps + 1):
         t = n * dt
 
-        # 1) Actualizar caudal por dinámica del ventilador
-        if tau_s is not None:
-            # 1er orden hacia Q_target
-            dQdt = (Q_target - Q) / tau_s
-            Q = Q + dt * dQdt
-            Q = max(0.0, Q)  # sin flujo negativo
+        # 1) Ventilador: rampa 1er orden de U(t) hacia U_target
+        if dynamic_fan:
+            dUdt = (U_target - U) / tau_s
+            U = U + dt * dUdt
+            U = max(0.0, U)  # sin velocidades negativas
 
-        U = Q / Ly  # velocidad media
+        Q = U * Ly  # m^2/s
 
-        # 2) Fuente (spray) ON/OFF (evaluación centrada)
+        # 2) Spray ON/OFF (evaluación centrada)
         gate = gate_spray(P, t - 0.5*dt)
         m_src = m_dot * gate
 
-        # 3) ODE para c(t)
+        # 3) ODE de mezcla bien agitada para c(t)
         dc_dt = (Q / V) * (c_in - c) + m_src / (rho * V)
         c = c + dt * dc_dt
-        c = max(0.0, min(1.0, c))  # límites físicos
+        c = max(0.0, min(1.0, c))
 
         # 4) Guardar
         t_hist[n] = t
