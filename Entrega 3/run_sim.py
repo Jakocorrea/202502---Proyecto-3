@@ -64,7 +64,7 @@ def main():
     fig1, ax1 = plt.subplots()
     ax1.plot(t, c, linewidth=2, label="⟨c⟩(t)")
     ax1.set_xlabel("Tiempo, t [s]")
-    ax1.set_ylabel("Concentración promedio, ⟨c⟩ [Kg_pintura/Kg_mezcla]")
+    ax1.set_ylabel("Concentración promedio, ⟨c⟩ [Kg_p/Kg_m]")
     ax1.set_title("Concentración de pintura en el ambiente vs tiempo")
 
     c_inf = estimate_upper_asymptote(c, tail_frac=0.15, quantile=0.90)
