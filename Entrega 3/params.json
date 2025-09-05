@@ -3,14 +3,14 @@
   "Ly": 1.0,
 
   "rho_air_in": 1.225,
-  "U_air_in": 0.2,
+  "U_air_in": 0.25,
 
   "rho_paint_in": 0.5,
   "Q_paint_in": 0.00000133,
 
   "fan": {
     "type": "constant",
-    "Q_fan_m2_per_h": 780.0
+    "Q_fan_m2_per_h": 1430.0
   },
 
   "mix_tau_s": 3.0,
