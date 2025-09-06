@@ -34,7 +34,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.ticker import AutoMinorLocator
 
-from sim_logic import config_from_json, Simulator
+from sim_logic2 import config_from_json, Simulator
 
 
 # -------------------- Estilo --------------------

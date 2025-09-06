@@ -3,7 +3,7 @@
 
 import argparse
 from typing import Dict, List
-from sim_logic import config_from_json, Simulator
+from sim_logic2 import config_from_json, Simulator
 
 
 

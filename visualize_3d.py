@@ -21,7 +21,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Slider
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-from sim_logic import config_from_json, Simulator
+from sim_logic2 import config_from_json, Simulator
 
 
 # -------------------- Geometría / utilidades --------------------
